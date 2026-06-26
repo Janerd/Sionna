@@ -81,17 +81,27 @@ def compute_channel_from_paths(
     ue_pos_3d: np.ndarray,
     prev_rsrp_raw: Optional[np.ndarray] = None,
     prev_beam_id: Optional[np.ndarray] = None,
+    theta_r: Optional[np.ndarray] = None,
 ) -> Tuple:
     """
-    从 Sionna 2.x 射线追踪结果计算信道测量量和 CSI 特征
+    从 Sionna 2.0.1 射线追踪结果计算信道测量量和 CSI 特征
+
+    Sionna 2.0.1 中 paths.a 是 (a_real, a_imag) 元组，
+    在 _extract_path_data_sionna201 中已合并为复数数组：
+        a = a_real + 1j * a_imag
+
+    Sionna 2.0.1 中 paths 的维度（synthetic_array=True 时）：
+        a:     [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+        tau:   [num_rx, num_tx, num_paths]
+        phi_r: [num_rx, num_tx, num_paths]
+
+    注意：维度顺序是 [num_rx, ..., num_tx, ..., num_paths]
+    而不是旧版的 [num_tx, num_rx, num_paths]
 
     参数：
-        a:               路径复数增益 numpy 数组
-                         形状：[num_tx, num_rx, max_num_paths, num_time_steps, num_tx_ant, num_rx_ant]
+        a:               路径复数增益 numpy 数组（已合并 real+imag）
         tau:             路径时延 numpy 数组 [s]
-                         形状：[num_tx, num_rx, max_num_paths]
         phi_r:           到达方位角 numpy 数组 [rad]
-                         形状：[num_tx, num_rx, max_num_paths]
         path_types:      路径类型 numpy 数组（可能为 None）
         cfg:             仿真配置
         ue_vel:          UE 速度向量 [vx, vy]，单位 m/s
@@ -99,6 +109,7 @@ def compute_channel_from_paths(
         ue_pos_3d:       [3] UE 3D 坐标
         prev_rsrp_raw:   [C] 上一时隙的瞬时 RSRP（用于计算差分）
         prev_beam_id:    [C] 上一时隙的波束 ID（用于计算差分）
+        theta_r:         到达仰角 numpy 数组 [rad]（可选）
 
     返回：
         (SlotMeasurement, rsrp_diff, beam_id_diff)
@@ -121,22 +132,42 @@ def compute_channel_from_paths(
     for c in range(num_cells):
         try:
             # ---- 提取基站 c 到 UE 的路径数据 ----
-            # a 形状：[num_tx, num_rx, max_num_paths, num_time_steps, num_tx_ant, num_rx_ant]
-            # 对于 SISO（单天线），num_tx_ant=1, num_rx_ant=1
-            # 取第一个时间步（静态场景）
-            if a.ndim == 6:
-                a_c = a[c, 0, :, 0, 0, 0]   # [max_num_paths] 复数增益
-            elif a.ndim == 4:
-                # 某些版本可能是 [num_tx, num_rx, max_num_paths, num_time_steps]
-                a_c = a[c, 0, :, 0]
+            # Sionna 2.0.1 维度（synthetic_array=True）：
+            #   a:     [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+            #   tau:   [num_rx, num_tx, num_paths]
+            #   phi_r: [num_rx, num_tx, num_paths]
+            # 注意：只有 1 个 UE（接收机），所以 num_rx=1，rx 索引为 0
+            # 基站 c 对应 tx 索引 c
+
+            if a.ndim == 5:
+                # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+                a_c = a[0, 0, c, 0, :]   # [num_paths] 复数增益
             elif a.ndim == 3:
-                # [num_tx, num_rx, max_num_paths]
-                a_c = a[c, 0, :]
+                # [num_rx, num_tx, num_paths]（synthetic_array=True 时的简化形式）
+                a_c = a[0, c, :]
+            elif a.ndim == 6:
+                # 旧版格式 [num_tx, num_rx, max_num_paths, num_time_steps, num_tx_ant, num_rx_ant]
+                a_c = a[c, 0, :, 0, 0, 0]
+            elif a.ndim == 4:
+                a_c = a[c, 0, :, 0]
             else:
                 continue
 
-            tau_c = tau[c, 0, :]    # [max_num_paths] 时延 [s]
-            phi_r_c = phi_r[c, 0, :]  # [max_num_paths] 到达方位角 [rad]
+            if tau.ndim == 3:
+                # [num_rx, num_tx, num_paths]
+                tau_c = tau[0, c, :]
+            elif tau.ndim == 2:
+                tau_c = tau[c, :]
+            else:
+                tau_c = tau[c, 0, :]
+
+            if phi_r.ndim == 3:
+                # [num_rx, num_tx, num_paths]
+                phi_r_c = phi_r[0, c, :]
+            elif phi_r.ndim == 2:
+                phi_r_c = phi_r[c, :]
+            else:
+                phi_r_c = phi_r[c, 0, :]
 
         except (IndexError, TypeError):
             continue
@@ -431,7 +462,13 @@ def simulate_trajectory_channel(
         # 执行射线追踪（Sionna 2.x API）
         try:
             paths = scene_mgr.trace_paths()
-            a, tau, phi_r, path_types = scene_mgr.extract_path_data(paths)
+            # Sionna 2.0.1: extract_path_data 返回 (a, tau, phi_r, theta_r, path_types)
+            path_data = scene_mgr.extract_path_data(paths)
+            if len(path_data) == 5:
+                a, tau, phi_r, theta_r, path_types = path_data
+            else:
+                a, tau, phi_r, path_types = path_data
+                theta_r = None
 
             # 计算信道测量量和 CSI 特征
             meas, rsrp_diff, beam_id_diff = compute_channel_from_paths(
@@ -445,6 +482,7 @@ def simulate_trajectory_channel(
                 ue_pos_3d=ue_pos_3d,
                 prev_rsrp_raw=prev_rsrp_raw,
                 prev_beam_id=prev_beam_id,
+                theta_r=theta_r,
             )
         except Exception as e:
             # 射线追踪失败时使用默认值，并记录完整错误信息
@@ -459,9 +497,10 @@ def simulate_trajectory_channel(
                     _log(f"Scene 对象可用方法：{scene_methods}", "error")
                 except Exception:
                     pass
-            else:
-                # 后续时隙只记录简短警告（避免日志过大）
-                _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "warning")
+            # 后续时隙静默处理（不记录日志，避免日志文件过大）
+            # 如果需要调试，可以取消下面这行的注释：
+            # else:
+            #     _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "warning")
             meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
 
         # 存储结果

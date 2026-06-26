@@ -3,16 +3,22 @@ scene_setup.py
 ==============
 Sionna RT 场景和基站布局（对应 MATLAB generate_cell_layout.m）
 
-Sionna 版本：2.x（基于 PyTorch，不需要 TensorFlow）
-  - 2.x 中使用 scene.trace_paths() 而非 scene.compute_paths()
+Sionna 版本：2.0.1（基于 PyTorch，不需要 TensorFlow）
+
+Sionna 2.0.1 正确 API（基于源码分析）：
+  - 射线追踪：PathSolver()(scene, ...)  而非 scene.trace_paths() 或 scene.compute_paths()
+  - 路径对象：paths.a = (a_real, a_imag)，paths.tau，paths.phi_r，paths.theta_r
+  - 天线阵列：scene.tx_array 和 scene.rx_array 必须在调用 PathSolver 前设置
+  - PlanarArray：pattern 参数为字符串，可选 "iso", "dipole", "hw_dipole", "tr38901"
+  - Transmitter/Receiver：position 参数为 mi.Point3f 或可转换为 mi.Point3f 的列表
 
 主要功能：
   1. 加载 Sionna 内置的慕尼黑 3D 城市场景
-  2. 在场景中放置基站
+  2. 在场景中放置基站（六边形网格布局）
   3. 提供场景可视化功能
 
 慕尼黑场景坐标系说明：
-  - Sionna 内置慕尼黑场景的坐标原点在场景中心
+  - 坐标原点在场景中心（Frauenkirche 附近）
   - 场景范围约 ±500m（东西方向）× ±500m（南北方向）
   - 坐标单位：米（m）
   - X 轴：东西方向（正方向向东）
@@ -24,12 +30,6 @@ Sionna 版本：2.x（基于 PyTorch，不需要 TensorFlow）
   - 推荐：根据慕尼黑场景的真实街道布局手动指定基站位置
     → 在 config.py 中设置 bs_positions_override 参数
     → 或者运行 python scene_setup.py 查看场景图后手动调整
-
-UE 轨迹策略：
-  - 默认：随机生成（street_grid 类型，沿网格道路移动）
-  - 推荐：基于慕尼黑真实道路网络生成
-    → 轨迹应沿街道方向移动（避免穿越建筑物）
-    → 在路口处转弯（LOS/NLOS 突变的关键位置）
 """
 
 from __future__ import annotations
@@ -71,12 +71,14 @@ def _setup_matplotlib_font():
 _FONT_NAME = _setup_matplotlib_font()
 
 # =========================================================
-# Sionna RT 导入（Sionna 2.x API）
+# Sionna RT 导入（Sionna 2.0.1 API）
 # =========================================================
 try:
     import sionna
     import sionna.rt as srt
-    from sionna.rt import load_scene, Transmitter, Receiver, PlanarArray
+    from sionna.rt import load_scene, Transmitter, Receiver, PlanarArray, PathSolver
+    import mitsuba as mi
+    import drjit as dr
     SIONNA_AVAILABLE = True
     SIONNA_VERSION = sionna.__version__
 except ImportError:
@@ -92,8 +94,6 @@ from config import SimConfig
 # =========================================================
 
 # Sionna 内置慕尼黑场景的大致范围（单位：米）
-# 这些值基于 Sionna 文档和场景文件，实际运行时可通过
-# scene.bbox 属性获取精确范围
 MUNICH_SCENE_BOUNDS = {
     "xmin": -500.0,
     "xmax": 500.0,
@@ -102,24 +102,18 @@ MUNICH_SCENE_BOUNDS = {
 }
 
 # 慕尼黑场景中的典型街道方向（用于生成沿街道的 UE 轨迹）
-# 慕尼黑市中心街道主要沿东西（0°）和南北（90°）方向
-# 以及对角线方向（约 45°、135°）
 MUNICH_STREET_DIRECTIONS_DEG = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]
 
 # 慕尼黑场景中适合放置基站的位置（路灯杆/建筑物顶部）
-# 这些位置基于慕尼黑市中心的典型街道交叉口
-# 坐标单位：米，相对于场景中心
-# 注意：实际部署时应根据 scene_layout.png 可视化结果调整
 MUNICH_SUGGESTED_BS_POSITIONS = {
-    # 7 小区方案（UMi，ISD≈200m）
     7: np.array([
-        [0.0,    0.0],    # BS0: 场景中心
-        [200.0,  0.0],    # BS1: 东侧
-        [100.0,  173.0],  # BS2: 东北
-        [-100.0, 173.0],  # BS3: 西北
-        [-200.0, 0.0],    # BS4: 西侧
-        [-100.0, -173.0], # BS5: 西南
-        [100.0,  -173.0], # BS6: 东南
+        [0.0,    0.0],
+        [200.0,  0.0],
+        [100.0,  173.0],
+        [-100.0, 173.0],
+        [-200.0, 0.0],
+        [-100.0, -173.0],
+        [100.0,  -173.0],
     ], dtype=np.float32),
 }
 
@@ -143,11 +137,6 @@ def compute_hexagonal_bs_positions(
 
     返回：
         positions: [num_cells, 2] 基站 2D 坐标 [m]
-
-    注意：
-        六边形网格是理想化的部署方案。
-        在真实慕尼黑场景中，建议根据街道布局手动调整基站位置，
-        使基站位于街道交叉口或建筑物顶部，而不是建筑物内部。
     """
     positions = []
     positions.append([center[0], center[1]])
@@ -182,16 +171,8 @@ def get_bs_positions(cfg: SimConfig) -> np.ndarray:
 
     优先级：
     1. cfg.bs_positions_override（如果设置了手动指定的位置）
-    2. MUNICH_SUGGESTED_BS_POSITIONS（如果有预设的慕尼黑位置）
-    3. 六边形网格（默认）
-
-    参数：
-        cfg: 仿真配置
-
-    返回：
-        positions: [num_cells, 2] 基站 2D 坐标 [m]
+    2. 六边形网格（默认）
     """
-    # 检查是否有手动指定的位置
     if hasattr(cfg, "bs_positions_override") and cfg.bs_positions_override is not None:
         pos = np.array(cfg.bs_positions_override, dtype=np.float32)
         if pos.shape == (cfg.num_cells, 2):
@@ -200,67 +181,77 @@ def get_bs_positions(cfg: SimConfig) -> np.ndarray:
         else:
             print(f"警告：bs_positions_override 形状 {pos.shape} 不匹配，使用默认六边形网格")
 
-    # 使用六边形网格（默认）
     return compute_hexagonal_bs_positions(cfg.num_cells, cfg.isd)
 
 
 # =========================================================
-# Sionna 2.x 射线追踪辅助函数
+# Sionna 2.0.1 射线追踪辅助函数
 # =========================================================
 
-def _get_paths_sionna2(scene, cfg: SimConfig):
-    """Sionna 2.x 射线追踪 API 封装"""
+def _get_paths_sionna201(scene, cfg: SimConfig):
+    """
+    Sionna 2.0.1 射线追踪 API
+
+    正确用法（基于源码 path_solver.py）：
+        solver = PathSolver()
+        paths = solver(scene, max_depth=..., samples_per_src=..., ...)
+
+    注意：
+    - PathSolver 是独立的类，不是 scene 的方法
+    - scene.tx_array 和 scene.rx_array 必须在调用前设置
+    - scene.all_set(radio_map=False) 会检查是否设置了 tx_array/rx_array
+    """
+    solver = PathSolver()
+    paths = solver(
+        scene,
+        max_depth=cfg.max_reflections + cfg.max_diffractions,
+        samples_per_src=cfg.num_samples_per_ray,
+        los=True,
+        specular_reflection=True,
+        diffuse_reflection=False,
+        refraction=True,
+        diffraction=cfg.max_diffractions > 0,
+        edge_diffraction=False,
+    )
+    return paths
+
+
+def _extract_path_data_sionna201(paths):
+    """
+    从 Sionna 2.0.1 paths 对象提取路径数据
+
+    Sionna 2.0.1 中 Paths 对象的属性（基于源码 paths.py）：
+        paths.a:     (a_real, a_imag) 元组，每个形状为
+                     [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+                     或 [num_rx, num_tx, num_paths]（synthetic_array=True 时）
+        paths.tau:   路径时延 [s]，形状同上
+        paths.phi_r: 到达方位角 [rad]，形状同上
+        paths.theta_r: 到达仰角 [rad]，形状同上
+        paths.doppler: Doppler 频移 [Hz]，形状同上
+
+    注意：
+    - paths.a 是 (a_real, a_imag) 元组，不是复数张量
+    - 需要用 .numpy() 转换为 numpy 数组
+    """
     try:
-        paths = scene.trace_paths(
-            max_depth=cfg.max_reflections + cfg.max_diffractions,
-            num_samples=cfg.num_samples_per_ray,
-            diffraction=cfg.max_diffractions > 0,
-            scattering=False,
-        )
-        scene.compute_fields(paths, check_scene=False)
-        return paths
-    except AttributeError:
+        # paths.a 是 (a_real, a_imag) 元组
+        a_real, a_imag = paths.a
+        a_real_np = a_real.numpy()
+        a_imag_np = a_imag.numpy()
+        # 合并为复数数组
+        a = a_real_np + 1j * a_imag_np
+
+        tau = paths.tau.numpy()
+        phi_r = paths.phi_r.numpy()
+        theta_r = paths.theta_r.numpy()
+
+        # 路径类型（可选）
         try:
-            paths = scene.compute_paths(
-                max_depth=cfg.max_reflections + cfg.max_diffractions,
-                num_samples=cfg.num_samples_per_ray,
-                diffraction=cfg.max_diffractions > 0,
-                scattering=False,
-            )
-            return paths
-        except AttributeError as e:
-            raise RuntimeError(
-                f"Sionna API 不兼容（版本 {SIONNA_VERSION}）。\n"
-                f"错误：{e}\n"
-                f"请确认已安装 Sionna 2.x：pip install sionna>=2.0"
-            )
-
-
-def _extract_path_data_sionna2(paths, num_cells: int):
-    """从 Sionna 2.x paths 对象提取路径数据"""
-    import torch
-
-    try:
-        a = paths.a
-        if isinstance(a, torch.Tensor):
-            a = a.cpu().numpy()
-
-        tau = paths.tau
-        if isinstance(tau, torch.Tensor):
-            tau = tau.cpu().numpy()
-
-        phi_r = paths.phi_r
-        if isinstance(phi_r, torch.Tensor):
-            phi_r = phi_r.cpu().numpy()
-
-        try:
-            path_types = paths.types
-            if isinstance(path_types, torch.Tensor):
-                path_types = path_types.cpu().numpy()
+            path_types = paths.interactions.numpy()
         except AttributeError:
             path_types = None
 
-        return a, tau, phi_r, path_types
+        return a, tau, phi_r, theta_r, path_types
 
     except Exception as e:
         raise RuntimeError(f"路径数据提取失败：{e}")
@@ -272,29 +263,33 @@ def _extract_path_data_sionna2(paths, num_cells: int):
 
 class SceneManager:
     """
-    管理 Sionna RT 场景和基站布局（Sionna 2.x 兼容版本）
+    管理 Sionna RT 场景和基站布局（Sionna 2.0.1 兼容版本）
 
-    关于基站位置和 UE 轨迹的重要说明：
+    Sionna 2.0.1 正确使用方式（基于源码）：
     ─────────────────────────────────────────────────────
-    慕尼黑场景是真实的 3D 城市地图，基站和 UE 的位置需要
-    与真实街道布局对应，否则会出现：
-      - 基站放在建筑物内部（射线追踪结果异常）
-      - UE 轨迹穿越建筑物（物理上不合理）
-
-    推荐做法：
-    1. 先运行 scene_mgr.visualize_with_scene() 查看场景地图
-    2. 根据地图选择合适的基站位置（街道交叉口）
-    3. 在 config.py 中设置 bs_positions_override
-    4. UE 轨迹使用 street_grid 类型（沿街道方向移动）
+    1. 加载场景：scene = load_scene(sionna.rt.scene.munich)
+    2. 设置天线阵列：
+       scene.tx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
+       scene.rx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
+    3. 添加发射机和接收机：
+       tx = Transmitter(name="bs_0", position=[x, y, z])
+       scene.add(tx)
+       rx = Receiver(name="ue", position=[x, y, z])
+       scene.add(rx)
+    4. 执行射线追踪：
+       solver = PathSolver()
+       paths = solver(scene, max_depth=3, samples_per_src=1e6)
+    5. 提取路径数据：
+       a_real, a_imag = paths.a  # 注意：a 是元组，不是复数张量
+       tau = paths.tau
+       phi_r = paths.phi_r
 
     使用方法：
         scene_mgr = SceneManager(cfg)
         scene_mgr.setup()
-        # 查看场景地图和基站位置
         scene_mgr.visualize_with_scene(save_path="outputs/scene_map.png")
-        # 执行射线追踪
         paths = scene_mgr.trace_paths()
-        a, tau, phi_r, types = scene_mgr.extract_path_data(paths)
+        a, tau, phi_r, theta_r, types = scene_mgr.extract_path_data(paths)
     """
 
     SCENE_NAME = "munich"
@@ -306,7 +301,8 @@ class SceneManager:
         self.bs_positions_3d: Optional[np.ndarray] = None
         self._is_setup = False
         self._current_ue_pos: Optional[np.ndarray] = None
-        self._scene_bbox: Optional[Tuple] = None  # 场景实际边界
+        self._scene_bbox: Optional[Tuple] = None
+        self._path_solver: Optional[object] = None  # PathSolver 实例
 
     def setup(self) -> None:
         """初始化场景：加载 3D 城市模型，放置基站"""
@@ -326,13 +322,40 @@ class SceneManager:
         try:
             bbox = self.scene.bbox
             self._scene_bbox = (
-                float(bbox[0][0]), float(bbox[1][0]),  # xmin, xmax
-                float(bbox[0][1]), float(bbox[1][1]),  # ymin, ymax
+                float(bbox[0][0]), float(bbox[1][0]),
+                float(bbox[0][1]), float(bbox[1][1]),
             )
             print(f"场景边界：X=[{self._scene_bbox[0]:.0f}, {self._scene_bbox[1]:.0f}]m, "
                   f"Y=[{self._scene_bbox[2]:.0f}, {self._scene_bbox[3]:.0f}]m")
         except Exception:
             self._scene_bbox = None
+
+        # 设置天线阵列（必须在 PathSolver 调用前设置）
+        # Sionna 2.0.1 中 PlanarArray 的 pattern 参数为字符串
+        # 可选值："iso", "dipole", "hw_dipole", "tr38901"
+        tx_array = PlanarArray(
+            num_rows=1,
+            num_cols=1,
+            vertical_spacing=0.5,
+            horizontal_spacing=0.5,
+            pattern="iso",
+            polarization="V",
+        )
+        rx_array = PlanarArray(
+            num_rows=1,
+            num_cols=1,
+            vertical_spacing=0.5,
+            horizontal_spacing=0.5,
+            pattern="iso",
+            polarization="V",
+        )
+        self.scene.tx_array = tx_array
+        self.scene.rx_array = rx_array
+        print("天线阵列已设置（SISO，全向天线）")
+
+        # 设置载波频率
+        self.scene.frequency = self.cfg.fc
+        print(f"载波频率：{self.cfg.fc/1e9:.1f} GHz")
 
         # 获取基站位置
         self.bs_positions_2d = get_bs_positions(self.cfg)
@@ -343,7 +366,11 @@ class SceneManager:
             np.full(self.cfg.num_cells, self.cfg.h_bs, dtype=np.float32),
         ])
 
+        # 在场景中放置基站
         self._place_transmitters()
+
+        # 创建 PathSolver 实例（复用，避免每次重新创建）
+        self._path_solver = PathSolver()
 
         self._is_setup = True
         print(f"基站布局完成：{self.cfg.num_cells} 个基站，ISD={self.cfg.isd}m")
@@ -355,92 +382,80 @@ class SceneManager:
         print(f"Scene 可用方法（共 {len(scene_methods)} 个）：{scene_methods}")
 
     def _place_transmitters(self) -> None:
-        """在 Sionna 2.x 场景中放置基站"""
+        """在 Sionna 2.0.1 场景中放置基站"""
         for tx_name in list(self.scene.transmitters.keys()):
             self.scene.remove(tx_name)
 
         for c in range(self.cfg.num_cells):
             pos = self.bs_positions_3d[c]
-
-            antenna = PlanarArray(
-                num_rows=1,
-                num_cols=1,
-                vertical_spacing=0.5,
-                horizontal_spacing=0.5,
-                pattern="iso",
-                polarization="V",
-            )
-
             tx = Transmitter(
                 name=f"bs_{c}",
-                position=pos.tolist(),
+                position=[float(pos[0]), float(pos[1]), float(pos[2])],
                 orientation=[0.0, 0.0, 0.0],
             )
-            tx.antenna = antenna
             self.scene.add(tx)
 
         print(f"已放置 {self.cfg.num_cells} 个基站")
 
     def place_receiver(self, ue_pos_2d: np.ndarray) -> None:
-        """在场景中放置 UE"""
+        """
+        在场景中放置 UE（接收机）
+
+        参数：
+            ue_pos_2d: UE 的 2D 坐标 [x, y]，单位 m
+        """
         for rx_name in list(self.scene.receivers.keys()):
             self.scene.remove(rx_name)
 
         ue_pos_3d = [float(ue_pos_2d[0]), float(ue_pos_2d[1]), self.cfg.h_ue]
         self._current_ue_pos = np.array(ue_pos_3d, dtype=np.float32)
 
-        antenna = PlanarArray(
-            num_rows=1,
-            num_cols=1,
-            vertical_spacing=0.5,
-            horizontal_spacing=0.5,
-            pattern="iso",
-            polarization="V",
-        )
-
         rx = Receiver(
             name="ue",
             position=ue_pos_3d,
             orientation=[0.0, 0.0, 0.0],
         )
-        rx.antenna = antenna
         self.scene.add(rx)
 
     def trace_paths(self):
-        """执行射线追踪（Sionna 2.x API）"""
+        """
+        执行射线追踪（Sionna 2.0.1 API）
+
+        Sionna 2.0.1 正确用法：
+            solver = PathSolver()
+            paths = solver(scene, max_depth=..., samples_per_src=..., ...)
+
+        返回：
+            paths: Sionna 2.0.1 Paths 对象
+        """
         if not self._is_setup:
             raise RuntimeError("请先调用 setup() 初始化场景")
-        return _get_paths_sionna2(self.scene, self.cfg)
+
+        return _get_paths_sionna201(self.scene, self.cfg)
 
     def extract_path_data(self, paths):
-        """从路径对象提取数据"""
-        return _extract_path_data_sionna2(paths, self.cfg.num_cells)
+        """
+        从路径对象提取数据（Sionna 2.0.1 API）
+
+        返回：
+            a:          路径复数增益 numpy 数组（a_real + 1j * a_imag）
+            tau:        路径时延 numpy 数组 [s]
+            phi_r:      到达方位角 numpy 数组 [rad]
+            theta_r:    到达仰角 numpy 数组 [rad]
+            path_types: 路径类型 numpy 数组（可能为 None）
+        """
+        return _extract_path_data_sionna201(paths)
 
     @property
     def scene_bounds(self) -> Tuple[float, float, float, float]:
-        """
-        返回场景的 2D 边界 [xmin, xmax, ymin, ymax]
-
-        优先使用从场景对象获取的实际边界，
-        否则使用基于 ISD 的估算值。
-        """
+        """返回场景的 2D 边界 [xmin, xmax, ymin, ymax]"""
         if self._scene_bbox is not None:
             return self._scene_bbox
         margin = self.cfg.isd * 2.5
         return (-margin, margin, -margin, margin)
 
     def update_bs_positions(self, new_positions_2d: np.ndarray) -> None:
-        """
-        更新基站位置
-
-        参数：
-            new_positions_2d: [num_cells, 2] 新的基站 2D 坐标 [m]
-
-        使用场景：
-            1. 查看 visualize_with_scene() 生成的地图
-            2. 根据街道布局确定合适的基站位置
-            3. 调用此函数更新位置
-        """
+        """更新基站位置"""
         if new_positions_2d.shape != (self.cfg.num_cells, 2):
             raise ValueError(
                 f"基站位置数组形状错误：期望 ({self.cfg.num_cells}, 2)，"
@@ -458,13 +473,7 @@ class SceneManager:
             print(f"基站位置已更新")
 
     def visualize(self, save_path: Optional[str] = None, use_english: bool = True) -> None:
-        """
-        可视化基站布局（仅显示基站位置和覆盖范围，无地图背景）
-
-        参数：
-            save_path:   保存路径（None 则显示交互式窗口）
-            use_english: 使用英文标签（避免中文字体问题）
-        """
+        """可视化基站布局（仅显示基站位置和覆盖范围，无地图背景）"""
         fig, ax = plt.subplots(1, 1, figsize=(10, 10))
 
         for c in range(self.cfg.num_cells):
@@ -500,16 +509,9 @@ class SceneManager:
         """
         可视化基站布局叠加在场景俯视图上
 
-        使用 Sionna 2.x 的 scene.render() 生成场景俯视图，
-        然后叠加基站位置。
-
-        Sionna 2.x 中获取建筑物轮廓的方式：
+        Sionna 2.0.1 中获取建筑物轮廓的方式：
           - scene.objects：包含所有场景物体（建筑物、地面等）
-          - 每个物体的 mesh 属性包含顶点和面片信息
-          - 通过 mi.traverse(scene.mi_scene) 可以访问 Mitsuba 场景树
-
-        参数：
-            save_path: 保存路径（None 则显示交互式窗口）
+          - 每个物体的 vertices 属性包含顶点坐标（mi.TensorXf 格式）
         """
         if not self._is_setup or self.scene is None:
             print("警告：场景未初始化，只显示基站位置（无地图背景）")
@@ -518,30 +520,25 @@ class SceneManager:
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
 
-        # ---- 尝试多种方式获取建筑物轮廓 ----
+        # 尝试绘制建筑物轮廓
         building_count = 0
-
-        # 方式1：通过 scene.objects 获取物体顶点（Sionna 2.x 主要方式）
         try:
-            import torch
             for obj_name, obj in self.scene.objects.items():
                 try:
-                    # Sionna 2.x 中物体的顶点通过 .vertices 属性获取
-                    # 形状：[N, 3]，坐标单位为米
+                    # Sionna 2.0.1 中物体顶点通过 .vertices 属性获取
+                    # 类型为 mi.TensorXf，需要 .numpy() 转换
                     verts = obj.vertices
-                    if isinstance(verts, torch.Tensor):
-                        verts = verts.cpu().numpy()
+                    if hasattr(verts, 'numpy'):
+                        verts = verts.numpy()
                     else:
                         verts = np.array(verts)
 
                     if verts.ndim == 2 and verts.shape[1] >= 2 and len(verts) >= 3:
                         xy = verts[:, :2]
-                        # 过滤掉地面（z 坐标接近 0 的大面积物体）
                         z_vals = verts[:, 2] if verts.shape[1] >= 3 else np.zeros(len(verts))
-                        if np.max(z_vals) < 0.5:  # 地面，跳过
+                        if np.max(z_vals) < 0.5:
                             continue
 
-                        # 绘制建筑物轮廓（凸包近似）
                         from scipy.spatial import ConvexHull
                         try:
                             hull = ConvexHull(xy)
@@ -556,47 +553,13 @@ class SceneManager:
                 except Exception:
                     pass
         except Exception as e:
-            print(f"  方式1失败：{e}")
-
-        # 方式2：通过 scene.mi_scene 访问 Mitsuba 场景（备用）
-        if building_count == 0:
-            try:
-                import mitsuba as mi
-                mi_scene = self.scene.mi_scene
-                # 遍历 Mitsuba 场景中的所有形状
-                for shape in mi_scene.shapes():
-                    try:
-                        # 获取顶点位置
-                        params = mi.traverse(shape)
-                        verts_key = [k for k in params.keys() if "vertex_positions" in k]
-                        if verts_key:
-                            verts = np.array(params[verts_key[0]]).reshape(-1, 3)
-                            if len(verts) >= 3 and np.max(verts[:, 2]) > 0.5:
-                                xy = verts[:, :2]
-                                from scipy.spatial import ConvexHull
-                                try:
-                                    hull = ConvexHull(xy)
-                                    hull_pts = np.append(hull.vertices, hull.vertices[0])
-                                    ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
-                                            alpha=0.25, color="#8B8B8B", zorder=1)
-                                    ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
-                                            "-", color="#555555", linewidth=0.4, alpha=0.7, zorder=2)
-                                    building_count += 1
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"  方式2失败：{e}")
+            print(f"  建筑物轮廓绘制失败：{e}")
 
         if building_count > 0:
             print(f"已绘制 {building_count} 个建筑物轮廓")
         else:
-            # 方式3：如果都失败，用文字提示并显示场景边界框
-            print("注意：无法自动获取建筑物轮廓")
-            print("  建议：使用 scene.render() 生成 3D 渲染图查看场景")
+            print("注意：无法自动获取建筑物轮廓，只显示基站位置")
             xmin, xmax, ymin, ymax = self.scene_bounds
-            # 绘制场景边界
             rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
                                   fill=False, linestyle=":", color="gray",
                                   linewidth=1, alpha=0.5, zorder=1)
@@ -640,13 +603,12 @@ class SceneManager:
         ax.set_xlim(xmin * 1.1, xmax * 1.1)
         ax.set_ylim(ymin * 1.1, ymax * 1.1)
 
-        # 添加坐标轴说明
         ax.axhline(y=0, color="k", linewidth=0.5, alpha=0.3)
         ax.axvline(x=0, color="k", linewidth=0.5, alpha=0.3)
         ax.text(xmax * 0.95, 5, "E", fontsize=10, ha="right")
         ax.text(5, ymax * 0.95, "N", fontsize=10, va="top")
 
-        # 打印基站坐标（方便手动调整）
+        # 打印基站坐标
         print("\n当前基站坐标（可复制到 config.py 的 bs_positions_override）：")
         print("bs_positions_override = np.array([")
         for c in range(self.cfg.num_cells):
@@ -664,13 +626,7 @@ class SceneManager:
         plt.close()
 
     def get_street_aligned_bounds(self) -> Tuple[float, float, float, float]:
-        """
-        返回适合生成街道对齐轨迹的场景边界
-
-        慕尼黑场景中，UE 轨迹应限制在街道区域内，
-        避免进入建筑物密集区域。
-        保守估计：使用场景边界的 80%
-        """
+        """返回适合生成街道对齐轨迹的场景边界"""
         xmin, xmax, ymin, ymax = self.scene_bounds
         margin = max(50.0, self.cfg.isd * 0.5)
         return (xmin + margin, xmax - margin, ymin + margin, ymax - margin)
@@ -692,7 +648,6 @@ if __name__ == "__main__":
     print(f"站间距：{cfg.isd} m")
     print(f"Sionna 版本：{SIONNA_VERSION}")
 
-    # 计算基站位置
     positions = get_bs_positions(cfg)
     print(f"\n基站位置（六边形网格，ISD={cfg.isd}m）：")
     for i in range(len(positions)):
@@ -706,13 +661,11 @@ if __name__ == "__main__":
         output_dir = Path(cfg.output_dir)
         output_dir.mkdir(exist_ok=True)
 
-        # 生成场景地图（叠加基站位置）
         print("\n生成场景地图（含建筑物轮廓）...")
         scene_mgr.visualize_with_scene(
             save_path=str(output_dir / "scene_map_with_bs.png")
         )
 
-        # 生成简单布局图
         scene_mgr.visualize(
             save_path=str(output_dir / "scene_layout.png"),
             use_english=True,

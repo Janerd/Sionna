@@ -375,6 +375,7 @@ def simulate_trajectory_channel(
     traj,
     scene_mgr,
     cfg: SimConfig,
+    logger=None,
 ) -> Dict:
     """
     对一条完整轨迹执行信道仿真，提取所有时隙的特征
@@ -383,10 +384,25 @@ def simulate_trajectory_channel(
         traj:      Trajectory 对象（来自 trajectory.py）
         scene_mgr: SceneManager 对象（来自 scene_setup.py，Sionna 2.x 版本）
         cfg:       仿真配置
+        logger:    logging.Logger 对象（可选，用于记录错误到日志文件）
 
     返回：
         result 字典，包含所有时隙的信道数据和特征矩阵
     """
+    import traceback as _traceback
+
+    def _log(msg: str, level: str = "warning"):
+        """统一输出到控制台和日志文件"""
+        if logger is not None:
+            if level == "error":
+                logger.error(msg)
+            elif level == "debug":
+                logger.debug(msg)
+            else:
+                logger.warning(msg)
+        else:
+            print(msg)
+
     T = traj.num_slots
     C = cfg.num_cells
 
@@ -431,8 +447,21 @@ def simulate_trajectory_channel(
                 prev_beam_id=prev_beam_id,
             )
         except Exception as e:
-            # 射线追踪失败时使用默认值（例如 UE 在场景外）
-            print(f"  警告：时隙 {t} 射线追踪失败（{e}），使用默认值")
+            # 射线追踪失败时使用默认值，并记录完整错误信息
+            tb_str = _traceback.format_exc()
+            if t == 0:
+                # 第一个时隙失败时记录完整错误（包含 traceback 和 Scene API 信息）
+                _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "error")
+                _log(f"完整错误信息：\n{tb_str}", "error")
+                # 记录 Scene 对象的可用方法（帮助诊断 API 不兼容问题）
+                try:
+                    scene_methods = [m for m in dir(scene_mgr.scene) if not m.startswith("_")]
+                    _log(f"Scene 对象可用方法：{scene_methods}", "error")
+                except Exception:
+                    pass
+            else:
+                # 后续时隙只记录简短警告（避免日志过大）
+                _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "warning")
             meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
 
         # 存储结果

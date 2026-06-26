@@ -350,6 +350,10 @@ class SceneManager:
         print(f"基站高度：{self.cfg.h_bs}m")
         print(f"提示：运行 scene_mgr.visualize_with_scene() 可查看基站在地图上的位置")
 
+        # 记录 Scene 对象的可用方法（帮助诊断 API 兼容性）
+        scene_methods = [m for m in dir(self.scene) if not m.startswith("_")]
+        print(f"Scene 可用方法（共 {len(scene_methods)} 个）：{scene_methods}")
+
     def _place_transmitters(self) -> None:
         """在 Sionna 2.x 场景中放置基站"""
         for tx_name in list(self.scene.transmitters.keys()):

@@ -510,7 +510,7 @@ def main():
     for traj_idx, traj in enumerate(tqdm(trajectories, desc="信道仿真")):
         traj_start = time.time()
         try:
-            ch = simulate_trajectory_channel(traj, scene_mgr, cfg)
+            ch = simulate_trajectory_channel(traj, scene_mgr, cfg, logger=logger)
             channel_results.append(ch)
         except Exception as e:
             logger.error(f"轨迹 {traj_idx} 仿真失败：{e}")

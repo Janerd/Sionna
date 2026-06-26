@@ -1,0 +1,147 @@
+C:\AI\sionna) C:\Sionna>python verify_env.py
+============================================================
+Sionna RT 环境验证
+============================================================
+操作系统：Windows 10
+Python：3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]
+
+【1】Python 版本
+  [✓] Python >= 3.10：当前版本 3.11.15
+
+【2】CUDA 和 GPU
+  [✓] nvidia-smi 可用：NVIDIA GeForce RTX 4060 Ti, 16380 MiB, 591.86
+
+【3】PyTorch
+  [✓] torch 已安装：版本 2.9.1+cu126
+  [✓] CUDA 可用：是
+  [✓] GPU 信息：NVIDIA GeForce RTX 4060 Ti，显存 16.0 GB
+  [✓] GPU 计算测试：矩阵乘法正常
+  [✓] CUDA 版本：12.6
+
+【4】Sionna
+  [✓] sionna 已安装：版本 2.0.1
+jitc_llvm_init(): LLVM API initialization failed ..
+  [✓] sionna.rt 模块：射线追踪模块可用
+  [✓] 内置场景（munich）：可访问
+
+【5】其他依赖包
+  [✓] numpy：版本 2.4.6
+  [✓] scipy：版本 1.17.1
+  [✓] pandas：版本 3.0.3
+  [✓] matplotlib：版本 3.11.0
+  [✓] tqdm：版本 4.68.3
+  [✓] h5py：版本 3.16.0
+  [✓] scikit-learn：版本 1.9.0
+
+【6】磁盘空间
+  [✓] 可用磁盘空间 >= 10GB：当前可用 245.1 GB
+
+【7】项目文件
+  [✓] config.py：存在
+  [✓] scene_setup.py：存在
+  [✓] trajectory.py：存在
+  [✓] channel.py：存在
+  [✓] generate_dataset.py：存在
+
+【8】快速功能测试
+  [✓] config.py：UMi 配置，特征维度=63
+  [✓] trajectory.py：street_grid 轨迹，900 slots
+  [✓] channel.py：特征维度=63，L3 滤波正常
+
+============================================================
+✓ 所有检查通过！可以运行 generate_dataset.py
+
+运行命令：
+  cd C:\Users\haojia\Sionna
+  python generate_dataset.py
+
+预计运行时间（RTX 4060 Ti）：
+  UMi 场景，60 条轨迹：约 1~2 小时
+  UMa 场景，120 条轨迹：约 3~5 小时
+============================================================
+
+
+(C:\AI\sionna) C:\Sionna>python generate_dataset.py
+jitc_llvm_init(): LLVM API initialization failed ..
+============================================================
+Sionna RT 数据集生成
+============================================================
+场景：umi，7 小区，ISD=200.0m
+轨迹数：60，速度：[30.0, 60.0, 120.0] km/h
+特征维度：63（= 9 × 7）
+标签：未来 5 slots 后的最优 SINR 小区
+输出目录：C:\Sionna\outputs
+GPU：是
+
+步骤 1/4：初始化 Sionna RT 场景...
+正在加载 Sionna 场景：munich...
+（第一次运行需要下载场景文件，约 50MB，请确保网络连接正常）
+场景加载完成
+已放置 7 个基站
+基站布局完成：7 个基站，ISD=200.0m
+基站高度：10.0m
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 22522 (\N{CJK UNIFIED IDEOGRAPH-57FA}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 31449 (\N{CJK UNIFIED IDEOGRAPH-7AD9}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 24067 (\N{CJK UNIFIED IDEOGRAPH-5E03}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 23616 (\N{CJK UNIFIED IDEOGRAPH-5C40}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 65288 (\N{FULLWIDTH LEFT PARENTHESIS}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 20010 (\N{CJK UNIFIED IDEOGRAPH-4E2A}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 23567 (\N{CJK UNIFIED IDEOGRAPH-5C0F}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 21306 (\N{CJK UNIFIED IDEOGRAPH-533A}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 65292 (\N{FULLWIDTH COMMA}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 65289 (\N{FULLWIDTH RIGHT PARENTHESIS}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 20301 (\N{CJK UNIFIED IDEOGRAPH-4F4D}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+C:\Sionna\scene_setup.py:317: UserWarning: Glyph 32622 (\N{CJK UNIFIED IDEOGRAPH-7F6E}) missing from font(s) DejaVu Sans.
+  plt.savefig(save_path, dpi=150, bbox_inches="tight")
+场景图已保存到：outputs\scene_layout.png
+
+步骤 2/4：生成 UE 轨迹...
+开始生成轨迹：60 条，3 种速度
+
+速度：30 km/h (8.33 m/s)
+  轨迹 5/20 (linear): 900 slots, 距离≈300m
+  轨迹 10/20 (linear): 900 slots, 距离≈300m
+  轨迹 15/20 (linear): 900 slots, 距离≈300m
+  轨迹 20/20 (linear): 900 slots, 距离≈300m
+
+速度：60 km/h (16.67 m/s)
+  轨迹 5/20 (linear): 450 slots, 距离≈300m
+  轨迹 10/20 (linear): 450 slots, 距离≈300m
+  轨迹 15/20 (linear): 450 slots, 距离≈300m
+  轨迹 20/20 (linear): 450 slots, 距离≈300m
+
+速度：120 km/h (33.33 m/s)
+  轨迹 5/20 (linear): 225 slots, 距离≈300m
+  轨迹 10/20 (linear): 225 slots, 距离≈300m
+  轨迹 15/20 (linear): 225 slots, 距离≈300m
+  轨迹 20/20 (linear): 225 slots, 距离≈300m
+
+轨迹生成完成：共 60 条
+
+步骤 3/4：执行信道仿真（60 条轨迹）...
+（使用 Sionna RT 射线追踪，RTX 4060 Ti 约需 1~3 小时）
+信道仿真:   0%|                                                                                 | 0/60 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "C:\Sionna\generate_dataset.py", line 574, in <module>
+    main()
+  File "C:\Sionna\generate_dataset.py", line 499, in main
+    ch = simulate_trajectory_channel(traj, scene_mgr, cfg)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Sionna\channel.py", line 499, in simulate_trajectory_channel
+    paths = scene_mgr.compute_paths()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Sionna\scene_setup.py", line 251, in compute_paths
+    paths = self.scene.compute_paths(
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Scene' object has no attribute 'compute_paths'

@@ -1,0 +1,53 @@
+# =========================================================
+# Sionna RT 仿真项目 .gitignore
+# =========================================================
+
+# ---- 生成的数据集（体积大，不放 git）----
+outputs/
+outputs_*/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- Jupyter Notebook ----
+.ipynb_checkpoints/
+*.ipynb
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- IDE ----
+.vscode/settings.json
+.idea/
+
+# ---- 临时文件 ----
+*.tmp
+*.bak
+*.swp
+
+# =========================================================
+# 以下文件【需要放 git】（不在此列表中）：
+#   channel.py          信道仿真和特征提取
+#   config.py           仿真参数配置
+#   generate_dataset.py 主数据生成脚本
+#   scene_setup.py      场景和基站布局
+#   trajectory.py       UE 轨迹生成
+#   verify_env.py       环境验证
+#   verify_dataset.py   数据集验证
+#   README.md           项目说明
+#   setup.md            环境安装说明
+#   requirements.txt    Python 依赖
+#   LICENSE             许可证
+#   log_print.txt       运行日志（建议放 git，用于追踪实验记录）
+# =========================================================

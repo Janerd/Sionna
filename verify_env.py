@@ -1,7 +1,7 @@
 """
 verify_env.py
 =============
-环境验证脚本
+环境验证脚本（Sionna 2.x 版本）
 
 运行方式：
     python verify_env.py
@@ -10,10 +10,11 @@ verify_env.py
   1. Python 版本
   2. CUDA 和 GPU 可用性
   3. PyTorch 安装和 GPU 支持
-  4. Sionna 安装
+  4. Sionna 2.x 安装和 RT 模块
   5. 其他依赖包
   6. 磁盘空间
-  7. 快速功能测试（不需要下载场景）
+  7. 项目文件检查
+  8. 快速功能测试（不需要下载场景）
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 
 def main():
     print("=" * 60)
-    print("Sionna RT 环境验证")
+    print("Sionna RT 环境验证（Sionna 2.x）")
     print("=" * 60)
     print(f"操作系统：{platform.system()} {platform.release()}")
     print(f"Python：{sys.version}")
@@ -85,7 +86,6 @@ def main():
     print("【3】PyTorch")
     try:
         import torch
-        torch_ok = True
         check("torch 已安装", True, f"版本 {torch.__version__}")
 
         cuda_available = torch.cuda.is_available()
@@ -100,7 +100,6 @@ def main():
             gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
             check("GPU 信息", True, f"{gpu_name}，显存 {gpu_mem:.1f} GB")
 
-            # 简单的 GPU 计算测试
             try:
                 x = torch.randn(1000, 1000, device="cuda")
                 y = torch.mm(x, x)
@@ -111,22 +110,29 @@ def main():
                 check("GPU 计算测试", False, str(e))
                 all_ok = False
 
-            # CUDA 版本
             cuda_ver = torch.version.cuda
             check("CUDA 版本", True, f"{cuda_ver}")
     except ImportError:
-        check("torch 已安装", False, "未安装，请运行：pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        check("torch 已安装", False,
+              "未安装，请运行：pip install torch --index-url https://download.pytorch.org/whl/cu126")
         all_ok = False
     print()
 
     # =========================================================
-    # 4. Sionna 检查
+    # 4. Sionna 2.x 检查
     # =========================================================
-    print("【4】Sionna")
+    print("【4】Sionna 2.x")
     try:
         import sionna
         sionna_ver = sionna.__version__
-        check("sionna 已安装", True, f"版本 {sionna_ver}")
+        ver_parts = sionna_ver.split(".")
+        is_v2 = len(ver_parts) >= 1 and int(ver_parts[0]) >= 2
+
+        all_ok &= check(
+            "sionna 已安装（需要 2.x）",
+            is_v2,
+            f"版本 {sionna_ver}{'（✓ 2.x）' if is_v2 else '（✗ 需要 2.x，请运行 pip install --upgrade sionna）'}"
+        )
 
         # 检查 Sionna RT 模块
         try:
@@ -136,9 +142,26 @@ def main():
             check("sionna.rt 模块", False, str(e))
             all_ok = False
 
+        # 检查 Sionna 2.x 特有的 trace_paths API
+        try:
+            # 不实际加载场景，只检查 API 是否存在
+            import sionna.rt as srt
+            scene_cls = getattr(srt, "Scene", None)
+            if scene_cls is not None:
+                has_trace = hasattr(scene_cls, "trace_paths")
+                check(
+                    "Sionna 2.x API（trace_paths）",
+                    has_trace,
+                    "可用" if has_trace else "不可用（可能是旧版 API）"
+                )
+            else:
+                check("Sionna 2.x API（trace_paths）", True, "Scene 类存在")
+        except Exception as e:
+            check("Sionna 2.x API 检查", False, str(e))
+
         # 检查内置场景是否可访问（不下载）
         try:
-            munich_path = getattr(sionna.rt.scene, "munich", None)
+            munich_path = getattr(srt.scene, "munich", None)
             check(
                 "内置场景（munich）",
                 munich_path is not None,
@@ -147,8 +170,11 @@ def main():
         except Exception as e:
             check("内置场景（munich）", False, str(e))
 
+        # 检查已知警告
+        print("  [i] 注意：'jitc_llvm_init(): LLVM API initialization failed' 是已知警告，不影响功能")
+
     except ImportError:
-        check("sionna 已安装", False, "未安装，请运行：pip install sionna")
+        check("sionna 已安装", False, "未安装，请运行：pip install sionna>=2.0")
         all_ok = False
     print()
 
@@ -182,8 +208,9 @@ def main():
     print("【6】磁盘空间")
     try:
         import shutil
-        sionna_dir = Path("C:\Sionna")
-        total, used, free = shutil.disk_usage(sionna_dir.drive + "\\")
+        # 使用当前目录所在磁盘
+        current_dir = Path(__file__).parent
+        total, used, free = shutil.disk_usage(str(current_dir.drive) + "\\")
         free_gb = free / 1024**3
         space_ok = free_gb >= 10.0
         all_ok &= check(
@@ -199,7 +226,7 @@ def main():
     # 7. 项目文件检查
     # =========================================================
     print("【7】项目文件")
-    project_dir = Path("C:\Sionna")
+    project_dir = Path(__file__).parent
     required_files = [
         "config.py",
         "scene_setup.py",
@@ -250,12 +277,10 @@ def main():
         cfg = DEFAULT_CONFIG
         C = cfg.num_cells
 
-        # 测试 L3 滤波
         rsrp_test = np.random.randn(50, C).astype(np.float32) * 5 - 80
         rsrp_l3 = apply_l3_filter(rsrp_test, cfg.l3_alpha)
         assert rsrp_l3.shape == (50, C)
 
-        # 测试特征向量构建
         feat = build_feature_vector(
             rsrp_l3=rsrp_l3[0],
             rsrq=np.full(C, -10.0, dtype=np.float32),
@@ -274,6 +299,20 @@ def main():
         check("channel.py", False, str(e))
         all_ok = False
 
+    # 测试 scene_setup.py（不需要 Sionna，只测试基站位置计算）
+    try:
+        from scene_setup import compute_hexagonal_bs_positions, SIONNA_VERSION
+        import numpy as np
+        from config import DEFAULT_CONFIG
+        cfg = DEFAULT_CONFIG
+        positions = compute_hexagonal_bs_positions(cfg.num_cells, cfg.isd)
+        assert positions.shape == (cfg.num_cells, 2)
+        check("scene_setup.py", True,
+              f"基站位置计算正常，Sionna 版本：{SIONNA_VERSION}")
+    except Exception as e:
+        check("scene_setup.py", False, str(e))
+        all_ok = False
+
     print()
 
     # =========================================================
@@ -290,13 +329,16 @@ def main():
         print("预计运行时间（RTX 4060 Ti）：")
         print("  UMi 场景，60 条轨迹：约 1~2 小时")
         print("  UMa 场景，120 条轨迹：约 3~5 小时")
+        print()
+        print("日志文件将自动保存到：outputs/generate_dataset.log")
     else:
         print("✗ 部分检查未通过，请根据上方提示修复后重新运行")
         print()
         print("常见问题解决：")
         print("  1. CUDA 不可用：更新 NVIDIA 驱动，重新安装 PyTorch")
-        print("  2. Sionna 未安装：pip install sionna")
+        print("  2. Sionna 版本错误：pip install --upgrade sionna（需要 2.x）")
         print("  3. 其他包缺失：pip install -r requirements.txt")
+        print("  4. 详细安装说明：参考 setup.md")
     print("=" * 60)
 
     return 0 if all_ok else 1

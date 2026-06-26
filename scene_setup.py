@@ -496,17 +496,16 @@ class SceneManager:
         """
         可视化基站布局叠加在场景俯视图上
 
-        这是最重要的可视化功能：
-        - 显示慕尼黑真实建筑物轮廓（俯视图）
-        - 叠加基站位置
-        - 帮助判断基站是否在街道上（而非建筑物内）
+        使用 Sionna 2.x 的 scene.render() 生成场景俯视图，
+        然后叠加基站位置。
+
+        Sionna 2.x 中获取建筑物轮廓的方式：
+          - scene.objects：包含所有场景物体（建筑物、地面等）
+          - 每个物体的 mesh 属性包含顶点和面片信息
+          - 通过 mi.traverse(scene.mi_scene) 可以访问 Mitsuba 场景树
 
         参数：
             save_path: 保存路径（None 则显示交互式窗口）
-
-        注意：
-            此功能需要 Sionna 已加载场景（调用 setup() 后）。
-            如果 Sionna 未安装，只显示基站位置（无地图背景）。
         """
         if not self._is_setup or self.scene is None:
             print("警告：场景未初始化，只显示基站位置（无地图背景）")
@@ -515,43 +514,95 @@ class SceneManager:
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
 
-        # 尝试绘制场景建筑物轮廓
+        # ---- 尝试多种方式获取建筑物轮廓 ----
+        building_count = 0
+
+        # 方式1：通过 scene.objects 获取物体顶点（Sionna 2.x 主要方式）
         try:
-            # Sionna 2.x 中可以通过 scene.objects 获取场景中的物体
-            # 每个物体有 bbox（边界框）属性
-            building_count = 0
+            import torch
             for obj_name, obj in self.scene.objects.items():
                 try:
-                    # 获取物体的顶点坐标（俯视图投影到 XY 平面）
-                    vertices = obj.vertices.numpy()  # [N, 3]
-                    # 只取 XY 坐标
-                    xy = vertices[:, :2]
-                    # 绘制建筑物轮廓（简化为凸包）
-                    from scipy.spatial import ConvexHull
-                    if len(xy) >= 3:
+                    # Sionna 2.x 中物体的顶点通过 .vertices 属性获取
+                    # 形状：[N, 3]，坐标单位为米
+                    verts = obj.vertices
+                    if isinstance(verts, torch.Tensor):
+                        verts = verts.cpu().numpy()
+                    else:
+                        verts = np.array(verts)
+
+                    if verts.ndim == 2 and verts.shape[1] >= 2 and len(verts) >= 3:
+                        xy = verts[:, :2]
+                        # 过滤掉地面（z 坐标接近 0 的大面积物体）
+                        z_vals = verts[:, 2] if verts.shape[1] >= 3 else np.zeros(len(verts))
+                        if np.max(z_vals) < 0.5:  # 地面，跳过
+                            continue
+
+                        # 绘制建筑物轮廓（凸包近似）
+                        from scipy.spatial import ConvexHull
                         try:
                             hull = ConvexHull(xy)
                             hull_pts = np.append(hull.vertices, hull.vertices[0])
                             ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    alpha=0.2, color="gray", zorder=1)
+                                    alpha=0.25, color="#8B8B8B", zorder=1)
                             ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    "k-", linewidth=0.3, alpha=0.5, zorder=2)
+                                    "-", color="#555555", linewidth=0.4, alpha=0.7, zorder=2)
                             building_count += 1
                         except Exception:
                             pass
                 except Exception:
                     pass
-
-            if building_count > 0:
-                print(f"已绘制 {building_count} 个建筑物轮廓")
-            else:
-                print("注意：无法获取建筑物轮廓，只显示基站位置")
-                ax.text(0, 0, "Building outlines not available\n(Sionna API limitation)",
-                        ha="center", va="center", fontsize=10, color="gray",
-                        transform=ax.transAxes)
-
         except Exception as e:
-            print(f"注意：建筑物轮廓绘制失败（{e}），只显示基站位置")
+            print(f"  方式1失败：{e}")
+
+        # 方式2：通过 scene.mi_scene 访问 Mitsuba 场景（备用）
+        if building_count == 0:
+            try:
+                import mitsuba as mi
+                mi_scene = self.scene.mi_scene
+                # 遍历 Mitsuba 场景中的所有形状
+                for shape in mi_scene.shapes():
+                    try:
+                        # 获取顶点位置
+                        params = mi.traverse(shape)
+                        verts_key = [k for k in params.keys() if "vertex_positions" in k]
+                        if verts_key:
+                            verts = np.array(params[verts_key[0]]).reshape(-1, 3)
+                            if len(verts) >= 3 and np.max(verts[:, 2]) > 0.5:
+                                xy = verts[:, :2]
+                                from scipy.spatial import ConvexHull
+                                try:
+                                    hull = ConvexHull(xy)
+                                    hull_pts = np.append(hull.vertices, hull.vertices[0])
+                                    ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
+                                            alpha=0.25, color="#8B8B8B", zorder=1)
+                                    ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
+                                            "-", color="#555555", linewidth=0.4, alpha=0.7, zorder=2)
+                                    building_count += 1
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"  方式2失败：{e}")
+
+        if building_count > 0:
+            print(f"已绘制 {building_count} 个建筑物轮廓")
+        else:
+            # 方式3：如果都失败，用文字提示并显示场景边界框
+            print("注意：无法自动获取建筑物轮廓")
+            print("  建议：使用 scene.render() 生成 3D 渲染图查看场景")
+            xmin, xmax, ymin, ymax = self.scene_bounds
+            # 绘制场景边界
+            rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+                                  fill=False, linestyle=":", color="gray",
+                                  linewidth=1, alpha=0.5, zorder=1)
+            ax.add_patch(rect)
+            ax.text(0.5, 0.5,
+                    "Munich Scene\n(Building outlines unavailable)\n"
+                    "Use scene.render() for 3D view",
+                    ha="center", va="center", fontsize=11, color="#666666",
+                    transform=ax.transAxes,
+                    bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
         # 绘制基站位置
         for c in range(self.cfg.num_cells):

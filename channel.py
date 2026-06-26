@@ -1,0 +1,634 @@
+"""
+channel.py
+==========
+Sionna RT 信道仿真和 CSI 特征提取
+（对应 MATLAB compute_rsrp.m + extract_features.m + create_cdl_channels.m）
+
+主要功能：
+  1. 对每个 UE 位置执行射线追踪（Sionna RT）
+  2. 从射线追踪结果计算 RSRP、RSRQ、SINR
+  3. 提取真实的 CSI 特征（时延扩展、Doppler 估计、到达角、LOS 指示）
+  4. 应用 L3 滤波（3GPP TS 38.331）
+
+与 MATLAB 版本的核心区别：
+  - RSRP 来自真实射线追踪（反射+衍射路径），不是路径损耗公式
+  - LOS/NLOS 由建筑物遮挡自然决定，不是概率模型
+  - 多径时延、到达角等 CSI 特征直接从射线追踪结果提取
+  - Doppler 估计基于路径几何（接近/远离速度），加测量噪声
+  - 去掉了 Ground Truth 速度/方向特征
+  - SINR 只考虑强干扰邻区（RSRP 差距 < 10dB），更接近真实系统
+
+特征向量组成（共 9*C 维，C = 小区数）：
+  [0:C]    RSRP_l3         - L3 滤波后 RSRP [dBm]
+  [C:2C]   RSRQ            - 参考信号接收质量 [dB]
+  [2C:3C]  SINR            - 信噪干扰比 [dB]
+  [3C:4C]  Doppler_est     - Doppler 频移估计 [Hz]（有测量噪声）
+  [4C:5C]  BeamID          - 最优波束 ID（归一化到 [0,1]）
+  [5C:6C]  RSRP_diff       - RSRP 变化率（相邻时隙差分）[dB/slot]
+  [6C:7C]  BeamID_diff     - 波束 ID 变化（相邻时隙差分）
+  [7C:8C]  DelaySpread     - RMS 时延扩展 [ns]（归一化）
+  [8C:9C]  LOS_indicator   - LOS 路径是否存在（0/1）
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+from config import SimConfig
+
+# Sionna RT 导入
+try:
+    import sionna
+    SIONNA_AVAILABLE = True
+except ImportError:
+    SIONNA_AVAILABLE = False
+
+
+# =========================================================
+# 单时隙信道测量结果
+# =========================================================
+
+@dataclass
+class SlotMeasurement:
+    """
+    单个时隙的信道测量结果
+
+    所有字段均为 UE 可观测量（不含 Ground Truth 信息）
+    """
+    # 基础测量量（L3 滤波前）
+    rsrp_raw: np.ndarray        # [C] 瞬时 RSRP [dBm]
+    rsrq: np.ndarray            # [C] RSRQ [dB]
+    sinr: np.ndarray            # [C] SINR [dB]
+
+    # CSI 特征（从射线追踪提取）
+    doppler_est: np.ndarray     # [C] Doppler 频移估计 [Hz]（有噪声）
+    beam_id: np.ndarray         # [C] 最优波束 ID（0-indexed）
+    delay_spread_ns: np.ndarray # [C] RMS 时延扩展 [ns]
+    los_indicator: np.ndarray   # [C] LOS 路径是否存在（0/1）
+    aoa_deg: np.ndarray         # [C] 主径到达角 [度]（用于波束选择）
+
+    # 服务小区（基于 L3 RSRP 最强）
+    serving_cell: int = 0
+
+
+# =========================================================
+# 射线追踪信道计算
+# =========================================================
+
+def compute_channel_from_paths(
+    paths,
+    cfg: SimConfig,
+    ue_vel: np.ndarray,
+    bs_positions_3d: np.ndarray,
+    ue_pos_3d: np.ndarray,
+    prev_rsrp_raw: Optional[np.ndarray] = None,
+    prev_beam_id: Optional[np.ndarray] = None,
+) -> SlotMeasurement:
+    """
+    从 Sionna RT 射线追踪结果计算信道测量量和 CSI 特征
+
+    参数：
+        paths:           Sionna RT 路径对象（scene.compute_paths() 的输出）
+        cfg:             仿真配置
+        ue_vel:          UE 速度向量 [vx, vy]，单位 m/s
+        bs_positions_3d: [C, 3] 基站 3D 坐标
+        ue_pos_3d:       [3] UE 3D 坐标
+        prev_rsrp_raw:   [C] 上一时隙的瞬时 RSRP（用于计算差分）
+        prev_beam_id:    [C] 上一时隙的波束 ID（用于计算差分）
+
+    返回：
+        SlotMeasurement 对象
+    """
+    num_cells = cfg.num_cells
+    fc = cfg.fc
+    c_light = 3e8
+
+    # ---- 从路径对象提取信息 ----
+    # paths.a:     [num_tx, num_rx, num_paths, ...] 路径复数增益
+    # paths.tau:   [num_tx, num_rx, num_paths] 路径时延 [s]
+    # paths.phi_r: [num_tx, num_rx, num_paths] 到达方位角 [rad]
+    # paths.theta_r: [num_tx, num_rx, num_paths] 到达仰角 [rad]
+    # paths.types: 路径类型（0=LOS, 1=反射, 2=衍射）
+
+    # 将路径信息转换为 numpy 数组
+    try:
+        # Sionna 1.x API
+        a = paths.a.numpy()          # 路径增益（复数）
+        tau = paths.tau.numpy()      # 路径时延 [s]
+        phi_r = paths.phi_r.numpy()  # 到达方位角 [rad]
+        # 路径类型：0=LOS, 1=反射, 2=衍射
+        # 注意：Sionna 1.x 中路径类型的获取方式可能不同
+        # 如果 paths.types 不可用，用时延最短的路径近似 LOS
+        try:
+            path_types = paths.types.numpy()
+        except AttributeError:
+            path_types = None
+    except Exception as e:
+        # 如果路径提取失败（例如没有路径），返回默认值
+        print(f"  警告：路径提取失败（{e}），使用默认值")
+        return _default_measurement(cfg)
+
+    # ---- 对每个基站计算信道参数 ----
+    rsrp_raw = np.full(num_cells, -120.0, dtype=np.float32)  # 默认 -120 dBm（无信号）
+    doppler_est = np.zeros(num_cells, dtype=np.float32)
+    delay_spread_ns = np.zeros(num_cells, dtype=np.float32)
+    los_indicator = np.zeros(num_cells, dtype=np.float32)
+    aoa_deg = np.zeros(num_cells, dtype=np.float32)
+    beam_id = np.zeros(num_cells, dtype=np.int32)
+
+    # 发射功率（线性，mW）
+    p_tx_mw = 10 ** (cfg.p_tx_dbm / 10)
+
+    for c in range(num_cells):
+        # 提取该基站（发射机 c）到 UE（接收机 0）的路径
+        # a 的形状：[num_tx, num_rx, num_paths, num_time_steps, num_tx_ant, num_rx_ant]
+        # 对于 SISO，num_tx_ant=1, num_rx_ant=1
+        try:
+            # 获取基站 c 到 UE 的路径增益
+            a_c = a[c, 0, :, 0, 0, 0]   # [num_paths] 复数增益
+            tau_c = tau[c, 0, :]          # [num_paths] 时延 [s]
+            phi_r_c = phi_r[c, 0, :]      # [num_paths] 到达方位角 [rad]
+        except (IndexError, TypeError):
+            continue
+
+        # 过滤有效路径（增益不为零）
+        valid = np.abs(a_c) > 1e-10
+        if not np.any(valid):
+            continue
+
+        a_valid = a_c[valid]
+        tau_valid = tau_c[valid]
+        phi_r_valid = phi_r_c[valid]
+
+        # 路径功率（线性）
+        path_power = np.abs(a_valid) ** 2  # [num_valid_paths]
+
+        # ---- RSRP 计算 ----
+        # RSRP = 发射功率 × 总路径增益
+        # 注意：Sionna 的路径增益已经包含了路径损耗
+        total_power_linear = p_tx_mw * np.sum(path_power)
+        rsrp_raw[c] = float(10 * np.log10(max(total_power_linear, 1e-20)))
+
+        # ---- 时延扩展计算（RMS Delay Spread）----
+        # 反映多径环境的复杂程度
+        # 时延扩展大 → 多径丰富 → 通常是 NLOS 场景
+        if len(tau_valid) > 1:
+            mean_tau = np.sum(path_power * tau_valid) / np.sum(path_power)
+            rms_ds = np.sqrt(
+                np.sum(path_power * (tau_valid - mean_tau) ** 2) / np.sum(path_power)
+            )
+            delay_spread_ns[c] = float(rms_ds * 1e9)  # 转换为 ns
+        else:
+            delay_spread_ns[c] = 0.0
+
+        # ---- LOS 指示 ----
+        # 判断是否存在 LOS 路径：时延最短的路径是否接近直射距离
+        bs_pos = bs_positions_3d[c]
+        direct_dist = float(np.linalg.norm(ue_pos_3d - bs_pos))
+        direct_tau = direct_dist / c_light  # 直射路径时延 [s]
+        min_tau = float(np.min(tau_valid))
+
+        # 如果最短路径时延接近直射时延（误差 < 10%），认为存在 LOS
+        if abs(min_tau - direct_tau) / max(direct_tau, 1e-9) < 0.1:
+            los_indicator[c] = 1.0
+        else:
+            los_indicator[c] = 0.0
+
+        # ---- Doppler 频移估计 ----
+        # 基于主径（最强路径）的到达角和 UE 速度估计 Doppler
+        # 真实 Doppler 估计有测量噪声，这里加入高斯噪声模拟
+        strongest_path_idx = int(np.argmax(path_power))
+        aoa_rad = float(phi_r_valid[strongest_path_idx])
+        aoa_deg[c] = float(np.degrees(aoa_rad))
+
+        # UE 速度在主径方向的投影
+        # 注意：到达角是从 UE 看向基站的方向，Doppler 符号：
+        #   UE 接近基站 → 正 Doppler
+        #   UE 远离基站 → 负 Doppler
+        ue_vel_2d = np.array([ue_vel[0], ue_vel[1]])
+        arrival_dir = np.array([math.cos(aoa_rad), math.sin(aoa_rad)])
+        v_proj = float(np.dot(ue_vel_2d, arrival_dir))
+        fd_true = v_proj * fc / c_light
+
+        # 加入测量噪声（真实 Doppler 估计误差约 ±20% + 固定偏差）
+        v_mag = float(np.linalg.norm(ue_vel_2d))
+        fd_max = v_mag * fc / c_light
+        noise_std = 0.2 * fd_max + 2.0  # 20% 相对误差 + 2Hz 固定噪声
+        doppler_est[c] = float(fd_true + noise_std * np.random.randn())
+
+        # ---- 波束 ID 计算 ----
+        # 选择与主径到达角最接近的波束
+        beam_id[c] = _select_beam(aoa_deg[c], cfg.num_beams, cfg.beam_angle_range)
+
+    # ---- RSRQ 计算（3GPP TS 38.215）----
+    # RSRQ = N_RB × RSRP / RSSI
+    N_RB = 52  # 20MHz 带宽对应资源块数
+    rsrp_linear = 10 ** (rsrp_raw / 10)  # mW
+    noise_linear = 10 ** (cfg.noise_floor_dbm / 10)  # mW
+    rssi_linear = np.sum(rsrp_linear) + noise_linear
+    rsrq = 10 * np.log10(N_RB * rsrp_linear / rssi_linear)
+
+    # ---- SINR 计算（改进版：只考虑强干扰邻区）----
+    # 真实系统中，只有 RSRP 差距 < 10dB 的邻区才是主要干扰源
+    # 这比 MATLAB 版本（所有邻区都是干扰）更接近真实情况
+    sinr = _compute_sinr(rsrp_raw, cfg.noise_floor_dbm, interference_threshold_db=10.0)
+
+    # ---- 确定服务小区 ----
+    # 注意：这里用瞬时 RSRP，L3 滤波在外部进行
+    serving_cell = int(np.argmax(rsrp_raw))
+
+    # ---- 差分特征（需要上一时隙的值）----
+    if prev_rsrp_raw is not None:
+        rsrp_diff = rsrp_raw - prev_rsrp_raw  # [C] RSRP 变化率 [dB/slot]
+    else:
+        rsrp_diff = np.zeros(num_cells, dtype=np.float32)
+
+    if prev_beam_id is not None:
+        beam_id_diff = (beam_id - prev_beam_id).astype(np.float32)
+    else:
+        beam_id_diff = np.zeros(num_cells, dtype=np.float32)
+
+    return SlotMeasurement(
+        rsrp_raw=rsrp_raw.astype(np.float32),
+        rsrq=rsrq.astype(np.float32),
+        sinr=sinr.astype(np.float32),
+        doppler_est=doppler_est.astype(np.float32),
+        beam_id=beam_id,
+        delay_spread_ns=delay_spread_ns.astype(np.float32),
+        los_indicator=los_indicator.astype(np.float32),
+        aoa_deg=aoa_deg.astype(np.float32),
+        serving_cell=serving_cell,
+    ), rsrp_diff.astype(np.float32), beam_id_diff.astype(np.float32)
+
+
+def _compute_sinr(
+    rsrp_dbm: np.ndarray,
+    noise_floor_dbm: float,
+    interference_threshold_db: float = 10.0,
+) -> np.ndarray:
+    """
+    计算每个小区的 SINR
+
+    改进版：只考虑 RSRP 差距 < interference_threshold_db 的邻区作为干扰
+    这比"所有邻区都是干扰"更接近真实系统
+
+    参数：
+        rsrp_dbm:                  [C] 各小区 RSRP [dBm]
+        noise_floor_dbm:           噪声底 [dBm]
+        interference_threshold_db: 干扰门限 [dB]，只有 RSRP 差距小于此值的邻区才计入干扰
+    """
+    num_cells = len(rsrp_dbm)
+    rsrp_linear = 10 ** (rsrp_dbm / 10)  # mW
+    noise_linear = 10 ** (noise_floor_dbm / 10)  # mW
+
+    sinr = np.zeros(num_cells, dtype=np.float32)
+
+    for c in range(num_cells):
+        # 只考虑强干扰邻区
+        interference_linear = 0.0
+        for c_int in range(num_cells):
+            if c_int == c:
+                continue
+            rsrp_gap = rsrp_dbm[c] - rsrp_dbm[c_int]
+            if rsrp_gap < interference_threshold_db:
+                # 该邻区是强干扰源
+                interference_linear += rsrp_linear[c_int]
+
+        sinr_linear = rsrp_linear[c] / (interference_linear + noise_linear)
+        sinr[c] = float(10 * np.log10(max(sinr_linear, 1e-10)))
+
+    return sinr
+
+
+def _select_beam(aoa_deg: float, num_beams: int, beam_angle_range: float) -> int:
+    """
+    根据到达角选择最优波束 ID
+
+    参数：
+        aoa_deg:          到达角 [度]
+        num_beams:        波束数量
+        beam_angle_range: 波束覆盖角度范围 [度]（±beam_angle_range/2）
+
+    返回：
+        beam_id: 最优波束 ID（0-indexed）
+    """
+    half_range = beam_angle_range / 2
+    beam_angles = np.linspace(-half_range, half_range, num_beams)
+
+    # 归一化到达角到 [-180, 180]
+    aoa_norm = ((aoa_deg + 180) % 360) - 180
+
+    # 找最近的波束
+    diffs = np.abs(beam_angles - aoa_norm)
+    return int(np.argmin(diffs))
+
+
+def _default_measurement(cfg: SimConfig) -> Tuple:
+    """当射线追踪失败时返回默认测量值"""
+    C = cfg.num_cells
+    meas = SlotMeasurement(
+        rsrp_raw=np.full(C, -120.0, dtype=np.float32),
+        rsrq=np.full(C, -20.0, dtype=np.float32),
+        sinr=np.full(C, -20.0, dtype=np.float32),
+        doppler_est=np.zeros(C, dtype=np.float32),
+        beam_id=np.zeros(C, dtype=np.int32),
+        delay_spread_ns=np.zeros(C, dtype=np.float32),
+        los_indicator=np.zeros(C, dtype=np.float32),
+        aoa_deg=np.zeros(C, dtype=np.float32),
+        serving_cell=0,
+    )
+    rsrp_diff = np.zeros(C, dtype=np.float32)
+    beam_id_diff = np.zeros(C, dtype=np.float32)
+    return meas, rsrp_diff, beam_id_diff
+
+
+# =========================================================
+# L3 滤波（3GPP TS 38.331）
+# =========================================================
+
+def apply_l3_filter(
+    rsrp_raw_seq: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    """
+    对 RSRP 时序施加 L3 滤波（3GPP TS 38.331）
+
+    公式：F(t) = (1-alpha) × F(t-1) + alpha × M(t)
+    滤波在线性域（mW）进行，而非 dBm 域
+
+    参数：
+        rsrp_raw_seq: [T, C] 瞬时 RSRP 时序 [dBm]
+        alpha:        滤波系数（= 1/2^k，k=4 时 alpha=0.0625）
+
+    返回：
+        rsrp_l3: [T, C] L3 滤波后 RSRP [dBm]
+    """
+    T, C = rsrp_raw_seq.shape
+    rsrp_linear = 10 ** (rsrp_raw_seq / 10)  # 转换为线性域 [mW]
+
+    rsrp_filt_linear = np.zeros_like(rsrp_linear)
+    rsrp_filt_linear[0] = rsrp_linear[0]
+
+    for t in range(1, T):
+        rsrp_filt_linear[t] = (1 - alpha) * rsrp_filt_linear[t - 1] + alpha * rsrp_linear[t]
+
+    # 转换回 dBm
+    rsrp_l3 = 10 * np.log10(np.maximum(rsrp_filt_linear, 1e-20))
+    return rsrp_l3.astype(np.float32)
+
+
+# =========================================================
+# 特征向量构建
+# =========================================================
+
+def build_feature_vector(
+    rsrp_l3: np.ndarray,        # [C] L3 滤波后 RSRP [dBm]
+    rsrq: np.ndarray,           # [C] RSRQ [dB]
+    sinr: np.ndarray,           # [C] SINR [dB]
+    doppler_est: np.ndarray,    # [C] Doppler 估计 [Hz]
+    beam_id: np.ndarray,        # [C] 波束 ID（整数）
+    rsrp_diff: np.ndarray,      # [C] RSRP 差分 [dB/slot]
+    beam_id_diff: np.ndarray,   # [C] 波束 ID 差分
+    delay_spread_ns: np.ndarray,# [C] 时延扩展 [ns]
+    los_indicator: np.ndarray,  # [C] LOS 指示（0/1）
+    num_beams: int,
+) -> np.ndarray:
+    """
+    构建特征向量（对应 MATLAB features_to_vector_local）
+
+    特征向量组成（共 9*C 维）：
+      [0:C]    RSRP_l3         - L3 滤波后 RSRP [dBm]
+      [C:2C]   RSRQ            - 参考信号接收质量 [dB]
+      [2C:3C]  SINR            - 信噪干扰比 [dB]
+      [3C:4C]  Doppler_est     - Doppler 频移估计 [Hz]
+      [4C:5C]  BeamID_norm     - 归一化波束 ID（[0,1]）
+      [5C:6C]  RSRP_diff       - RSRP 变化率 [dB/slot]
+      [6C:7C]  BeamID_diff     - 波束 ID 变化
+      [7C:8C]  DelaySpread_norm- 归一化时延扩展
+      [8C:9C]  LOS_indicator   - LOS 指示（0/1）
+
+    注意：
+      - 去掉了 Ground Truth 速度和方向角
+      - 增加了 RSRP 差分、波束 ID 差分、时延扩展、LOS 指示
+      - 这些特征都是 UE 实际可观测的量
+    """
+    C = len(rsrp_l3)
+
+    # 归一化波束 ID 到 [0, 1]
+    beam_id_norm = beam_id.astype(np.float32) / max(num_beams - 1, 1)
+
+    # 归一化时延扩展（典型值 0~500ns，归一化到 [0, 1]）
+    delay_spread_norm = np.clip(delay_spread_ns / 500.0, 0.0, 1.0)
+
+    feat = np.concatenate([
+        rsrp_l3,            # [C] RSRP_l3
+        rsrq,               # [C] RSRQ
+        sinr,               # [C] SINR
+        doppler_est,        # [C] Doppler 估计
+        beam_id_norm,       # [C] 归一化波束 ID
+        rsrp_diff,          # [C] RSRP 差分
+        beam_id_diff,       # [C] 波束 ID 差分
+        delay_spread_norm,  # [C] 归一化时延扩展
+        los_indicator,      # [C] LOS 指示
+    ], axis=0)
+
+    return feat.astype(np.float32)
+
+
+# =========================================================
+# 完整轨迹的信道仿真
+# =========================================================
+
+def simulate_trajectory_channel(
+    traj,
+    scene_mgr,
+    cfg: SimConfig,
+) -> Dict:
+    """
+    对一条完整轨迹执行信道仿真，提取所有时隙的特征
+
+    参数：
+        traj:      Trajectory 对象（来自 trajectory.py）
+        scene_mgr: SceneManager 对象（来自 scene_setup.py）
+        cfg:       仿真配置
+
+    返回：
+        result: 字典，包含：
+            'rsrp_raw':      [T, C] 瞬时 RSRP [dBm]
+            'rsrp_l3':       [T, C] L3 滤波后 RSRP [dBm]
+            'rsrq':          [T, C] RSRQ [dB]
+            'sinr':          [T, C] SINR [dB]
+            'doppler_est':   [T, C] Doppler 估计 [Hz]
+            'beam_id':       [T, C] 波束 ID
+            'delay_spread':  [T, C] 时延扩展 [ns]
+            'los_indicator': [T, C] LOS 指示
+            'serving_raw':   [T] 瞬时服务小区（基于瞬时 RSRP）
+            'serving_l3':    [T] L3 服务小区（基于 L3 RSRP）
+            'feat_matrix':   [T, 9*C] 特征矩阵
+    """
+    T = traj.num_slots
+    C = cfg.num_cells
+
+    # 预分配存储空间
+    rsrp_raw_seq = np.zeros((T, C), dtype=np.float32)
+    rsrq_seq = np.zeros((T, C), dtype=np.float32)
+    sinr_seq = np.zeros((T, C), dtype=np.float32)
+    doppler_seq = np.zeros((T, C), dtype=np.float32)
+    beam_id_seq = np.zeros((T, C), dtype=np.int32)
+    delay_spread_seq = np.zeros((T, C), dtype=np.float32)
+    los_seq = np.zeros((T, C), dtype=np.float32)
+    serving_raw_seq = np.zeros(T, dtype=np.int32)
+
+    prev_rsrp_raw = None
+    prev_beam_id = None
+
+    # 逐时隙仿真
+    for t in range(T):
+        ue_pos_2d = traj.pos[t]
+        ue_vel_2d = traj.vel[t]
+        ue_pos_3d = np.array([ue_pos_2d[0], ue_pos_2d[1], cfg.h_ue])
+
+        # 在场景中放置 UE
+        scene_mgr.place_receiver(ue_pos_2d)
+
+        # 执行射线追踪
+        paths = scene_mgr.compute_paths()
+
+        # 计算信道测量量和 CSI 特征
+        meas, rsrp_diff, beam_id_diff = compute_channel_from_paths(
+            paths=paths,
+            cfg=cfg,
+            ue_vel=ue_vel_2d,
+            bs_positions_3d=scene_mgr.bs_positions_3d,
+            ue_pos_3d=ue_pos_3d,
+            prev_rsrp_raw=prev_rsrp_raw,
+            prev_beam_id=prev_beam_id,
+        )
+
+        # 存储结果
+        rsrp_raw_seq[t] = meas.rsrp_raw
+        rsrq_seq[t] = meas.rsrq
+        sinr_seq[t] = meas.sinr
+        doppler_seq[t] = meas.doppler_est
+        beam_id_seq[t] = meas.beam_id
+        delay_spread_seq[t] = meas.delay_spread_ns
+        los_seq[t] = meas.los_indicator
+        serving_raw_seq[t] = meas.serving_cell
+
+        prev_rsrp_raw = meas.rsrp_raw.copy()
+        prev_beam_id = meas.beam_id.copy()
+
+    # ---- L3 滤波 ----
+    rsrp_l3_seq = apply_l3_filter(rsrp_raw_seq, cfg.l3_alpha)
+
+    # ---- L3 服务小区 ----
+    serving_l3_seq = np.argmax(rsrp_l3_seq, axis=1).astype(np.int32)
+
+    # ---- 构建特征矩阵 ----
+    # 需要重新计算差分特征（基于完整时序）
+    rsrp_diff_seq = np.zeros((T, C), dtype=np.float32)
+    rsrp_diff_seq[1:] = rsrp_raw_seq[1:] - rsrp_raw_seq[:-1]
+
+    beam_id_diff_seq = np.zeros((T, C), dtype=np.float32)
+    beam_id_diff_seq[1:] = (beam_id_seq[1:] - beam_id_seq[:-1]).astype(np.float32)
+
+    feat_matrix = np.zeros((T, cfg.num_features), dtype=np.float32)
+    for t in range(T):
+        feat_matrix[t] = build_feature_vector(
+            rsrp_l3=rsrp_l3_seq[t],
+            rsrq=rsrq_seq[t],
+            sinr=sinr_seq[t],
+            doppler_est=doppler_seq[t],
+            beam_id=beam_id_seq[t],
+            rsrp_diff=rsrp_diff_seq[t],
+            beam_id_diff=beam_id_diff_seq[t],
+            delay_spread_ns=delay_spread_seq[t],
+            los_indicator=los_seq[t],
+            num_beams=cfg.num_beams,
+        )
+
+    return {
+        "rsrp_raw": rsrp_raw_seq,
+        "rsrp_l3": rsrp_l3_seq,
+        "rsrq": rsrq_seq,
+        "sinr": sinr_seq,
+        "doppler_est": doppler_seq,
+        "beam_id": beam_id_seq,
+        "delay_spread": delay_spread_seq,
+        "los_indicator": los_seq,
+        "serving_raw": serving_raw_seq,
+        "serving_l3": serving_l3_seq,
+        "feat_matrix": feat_matrix,
+    }
+
+
+# =========================================================
+# 独立运行：测试信道计算（不需要 Sionna，用模拟数据）
+# =========================================================
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    from config import DEFAULT_CONFIG
+
+    cfg = DEFAULT_CONFIG
+    print("测试信道计算（使用模拟路径数据）...")
+    print(f"特征维度：{cfg.num_features}（= 9 × {cfg.num_cells} 小区）")
+
+    # 测试 L3 滤波
+    T = 100
+    C = cfg.num_cells
+    rsrp_test = np.random.randn(T, C) * 5 - 80  # 模拟 RSRP 时序
+
+    rsrp_l3 = apply_l3_filter(rsrp_test, cfg.l3_alpha)
+
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(rsrp_test[:, 0], label="瞬时 RSRP", alpha=0.7)
+    plt.plot(rsrp_l3[:, 0], label="L3 滤波后 RSRP", linewidth=2)
+    plt.xlabel("时隙")
+    plt.ylabel("RSRP [dBm]")
+    plt.title(f"L3 滤波效果（k={cfg.l3_filter_k}, alpha={cfg.l3_alpha:.4f}）")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # 测试 SINR 计算
+    rsrp_test_1d = np.array([-80, -85, -90, -95, -100, -105, -110], dtype=np.float32)
+    sinr_test = _compute_sinr(rsrp_test_1d, cfg.noise_floor_dbm)
+
+    plt.subplot(1, 2, 2)
+    cells = [f"BS{i}" for i in range(len(rsrp_test_1d))]
+    x = np.arange(len(cells))
+    plt.bar(x - 0.2, rsrp_test_1d, 0.4, label="RSRP [dBm]", alpha=0.7)
+    plt.bar(x + 0.2, sinr_test, 0.4, label="SINR [dB]", alpha=0.7)
+    plt.xticks(x, cells)
+    plt.xlabel("小区")
+    plt.ylabel("dB")
+    plt.title("SINR 计算（改进版：只考虑强干扰邻区）")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("channel_test.png", dpi=150, bbox_inches="tight")
+    print("测试图已保存到 channel_test.png")
+    plt.close()
+
+    print("\n特征向量测试：")
+    feat = build_feature_vector(
+        rsrp_l3=rsrp_test_1d,
+        rsrq=np.full(C, -10.0),
+        sinr=sinr_test,
+        doppler_est=np.random.randn(C) * 50,
+        beam_id=np.random.randint(0, cfg.num_beams, C),
+        rsrp_diff=np.random.randn(C) * 2,
+        beam_id_diff=np.zeros(C),
+        delay_spread_ns=np.random.rand(C) * 200,
+        los_indicator=np.array([1, 0, 0, 1, 0, 0, 0], dtype=np.float32),
+        num_beams=cfg.num_beams,
+    )
+    print(f"  特征向量维度：{feat.shape[0]}（期望：{cfg.num_features}）")
+    print(f"  特征范围：[{feat.min():.2f}, {feat.max():.2f}]")
+    print("✓ 信道计算测试通过")

@@ -182,7 +182,7 @@ def main():
     print("【6】磁盘空间")
     try:
         import shutil
-        sionna_dir = Path("C:/Users/haojia/Sionna")
+        sionna_dir = Path("C:\Sionna")
         total, used, free = shutil.disk_usage(sionna_dir.drive + "\\")
         free_gb = free / 1024**3
         space_ok = free_gb >= 10.0
@@ -199,7 +199,7 @@ def main():
     # 7. 项目文件检查
     # =========================================================
     print("【7】项目文件")
-    project_dir = Path("C:/Users/haojia/Sionna")
+    project_dir = Path("C:\Sionna")
     required_files = [
         "config.py",
         "scene_setup.py",

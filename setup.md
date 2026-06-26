@@ -48,10 +48,12 @@ python --version
 
 ```bash
 # 安装 PyTorch 2.x，支持 CUDA 12.1
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu126 --no-cache-dir
 
 # 验证 GPU 可用
-python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
+#python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
+python -c "import torch; print('Torch版本:', torch.__version__); print('CUDA:', torch.version.cuda, torch.cuda.is_available())"
 # 应该显示：CUDA available: True
 #           GPU: NVIDIA GeForce RTX 4060 Ti
 ```
@@ -67,8 +69,8 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 ```bash
 # 安装 Sionna（当前最新版本 1.x）
-pip install sionna
-
+#pip install sionna
+pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall --no-cache-dir
 # 验证安装
 python -c "import sionna; print('Sionna version:', sionna.__version__)"
 ```
@@ -76,7 +78,7 @@ python -c "import sionna; print('Sionna version:', sionna.__version__)"
 **注意**：Sionna 1.x 基于 DrJit，不再依赖 TensorFlow，安装更简单。
 如果安装失败，尝试指定版本：
 ```bash
-pip install sionna==1.0.0
+#pip install sionna==1.0.0
 ```
 
 ---
@@ -85,7 +87,7 @@ pip install sionna==1.0.0
 
 ```bash
 # 安装项目其他依赖
-pip install -r C:\Users\haojia\Sionna\requirements.txt
+pip install -r C:\Sionna\requirements.txt
 ```
 
 ---
@@ -94,7 +96,7 @@ pip install -r C:\Users\haojia\Sionna\requirements.txt
 
 ```bash
 # 切换到项目目录
-cd C:\Users\haojia\Sionna
+cd C:\Sionna
 
 # 运行环境验证脚本
 python verify_env.py

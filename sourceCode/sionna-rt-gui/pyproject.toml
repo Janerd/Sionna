@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sionna-rt-gui"
+version = "0.1.1"
+description = "An interactive GUI to create and visualize Sionna RT scenes, paths and radio maps"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    {name = "Merlin Nimier-David", email = "sionna@nvidia.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "omegaconf",
+    "sionna-rt==1.2.2",
+    "polyscope",
+    "pandas",
+    "pyzmq",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "pylint",
+]
+
+[project.scripts]
+sionna-rt-gui = "scripts.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+
+[tool.setuptools.package-data]
+sionna_rt_gui = [
+    "data/configs/**/*.yaml",
+    "data/envmaps/*.md",
+    "data/envmaps/*.exr",
+    "data/scenes/**/*.xml",
+    "data/scenes/**/*.ply",
+    "data/scenes/**/*.obj",
+    "data/scenes/.gitkeep",
+]
+
+[tool.pylint.messages_control]
+disable = ["W1203"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["test"]

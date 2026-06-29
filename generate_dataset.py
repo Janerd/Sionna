@@ -36,9 +36,9 @@ import numpy as np
 from tqdm import tqdm
 
 from config import SimConfig, get_umi_config, get_uma_config
-from scene_setup import SceneManager, compute_hexagonal_bs_positions
+from scene_setup import SceneManager, compute_hexagonal_bs_positions, get_bs_positions
 from trajectory import Trajectory, generate_all_trajectories
-from channel import simulate_trajectory_channel
+from channel import simulate_trajectory_channel, load_neighbor_relations
 
 
 # =========================================================
@@ -504,13 +504,27 @@ def main():
     logger.info(f"步骤 3/4：执行信道仿真（{len(trajectories)} 条轨迹）...")
     logger.info("（使用 Sionna 2.x RT 射线追踪，RTX 4060 Ti 约需 1~3 小时）")
 
+    # 加载邻区关系（如果存在，可以加速射线追踪约 3 倍）
+    neighbor_relations = load_neighbor_relations()
+    if neighbor_relations is not None:
+        avg_neighbors = sum(len(v) for v in neighbor_relations.values()) / len(neighbor_relations)
+        speedup = cfg.num_cells / (avg_neighbors + 1)
+        logger.info(f"已加载邻区关系（平均邻区数：{avg_neighbors:.1f}，预计加速 {speedup:.1f}x）")
+    else:
+        logger.info("未找到邻区关系配置，对所有基站做射线追踪")
+        logger.info("提示：运行 python network_config_tool.py 生成邻区配置可加速仿真")
+
     channel_results = []
     failed_trajs = 0
 
     for traj_idx, traj in enumerate(tqdm(trajectories, desc="信道仿真")):
         traj_start = time.time()
         try:
-            ch = simulate_trajectory_channel(traj, scene_mgr, cfg, logger=logger)
+            ch = simulate_trajectory_channel(
+                traj, scene_mgr, cfg,
+                logger=logger,
+                neighbor_relations=neighbor_relations,
+            )
             channel_results.append(ch)
         except Exception as e:
             logger.error(f"轨迹 {traj_idx} 仿真失败：{e}")

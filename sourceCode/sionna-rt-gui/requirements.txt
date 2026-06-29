@@ -1,0 +1,7 @@
+black
+matplotlib
+numpy
+omegaconf
+sionna-rt==1.2.2
+polyscope>=2.6.0,<2.7.0
+pylint

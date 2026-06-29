@@ -1,0 +1,636 @@
+"""
+network_config_tool.py
+======================
+网络配置工具：交互式配置基站位置、邻区关系和 UE 轨迹预览
+
+两种运行模式：
+
+模式 1：GUI 模式（需要 polyscope，在家用电脑运行）
+    python network_config_tool.py --gui
+    - 启动官方 Sionna RT GUI，加载慕尼黑 3D 场景
+    - 用 Ctrl + 左键在场景中放置基站
+    - 关闭 GUI 后自动读取基站坐标
+    - 计算邻区关系，预览 UE 轨迹
+    - 保存到 network_config.json
+
+模式 2：无 GUI 模式（只需要 matplotlib，在公司电脑也可运行）
+    python network_config_tool.py --no-gui
+    - 读取 network_config.json 中的基站位置（或六边形网格默认值）
+    - 计算邻区关系
+    - 预览 UE 轨迹
+    - 更新 network_config.json
+
+安装依赖（家用电脑）：
+    pip install "polyscope>=2.6.0,<2.7.0" omegaconf
+
+工作流程：
+    1. 运行 --gui 模式，在 3D 场景中放置基站
+    2. 关闭 GUI，查看邻区关系和轨迹预览
+    3. 如需调整，修改 network_config.json 后重新运行 --no-gui
+    4. 确认后运行 python generate_dataset.py 开始仿真
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+
+# 配置 matplotlib 字体
+def _setup_font():
+    chinese_fonts = ["Microsoft YaHei", "SimHei", "SimSun", "Arial Unicode MS"]
+    available = [f.name for f in matplotlib.font_manager.fontManager.ttflist]
+    for font in chinese_fonts:
+        if font in available:
+            matplotlib.rcParams["font.family"] = font
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+_setup_font()
+
+# =========================================================
+# 配置文件路径
+# =========================================================
+
+NETWORK_CONFIG_PATH = Path(__file__).parent / "network_config.json"
+SCENE_BOUNDS = (-500.0, 500.0, -500.0, 500.0)  # 慕尼黑场景范围
+
+
+# =========================================================
+# 配置文件读写
+# =========================================================
+
+def load_network_config() -> dict:
+    """加载 network_config.json"""
+    if NETWORK_CONFIG_PATH.exists():
+        with open(NETWORK_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_network_config(cfg: dict) -> None:
+    """保存 network_config.json"""
+    with open(NETWORK_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    print(f"配置已保存到：{NETWORK_CONFIG_PATH}")
+
+
+def get_bs_positions_from_config(cfg: dict) -> np.ndarray:
+    """从配置文件提取基站位置 [num_cells, 2]"""
+    positions = cfg.get("bs_config", {}).get("positions", [])
+    if not positions:
+        # 使用六边形网格默认值
+        from scene_setup import compute_hexagonal_bs_positions
+        from config import get_umi_config
+        sim_cfg = get_umi_config()
+        return compute_hexagonal_bs_positions(sim_cfg.num_cells, sim_cfg.isd)
+
+    return np.array([[p["x"], p["y"]] for p in positions], dtype=np.float32)
+
+
+# =========================================================
+# 邻区关系计算
+# =========================================================
+
+def compute_neighbor_relations(
+    bs_positions: np.ndarray,
+    max_neighbors: int = 6,
+    method: str = "distance",
+    isd: float = 250.0,
+) -> Dict[str, List[int]]:
+    """
+    计算邻区关系
+
+    参数：
+        bs_positions: [num_cells, 2] 基站 2D 坐标
+        max_neighbors: 每个基站的最大邻区数
+        method: "distance"（基于距离）
+        isd: 站间距 [m]，用于确定邻区范围
+
+    返回：
+        邻区关系字典，key 为基站 ID（字符串），value 为邻区 ID 列表
+    """
+    num_cells = len(bs_positions)
+    relations = {}
+
+    # 邻区范围：2.5 个 ISD 以内的基站
+    max_dist = isd * 2.5
+
+    for i in range(num_cells):
+        dists = np.linalg.norm(bs_positions - bs_positions[i], axis=1)
+        dists[i] = np.inf  # 排除自身
+
+        # 只考虑距离在 max_dist 以内的基站
+        candidates = np.where(dists < max_dist)[0]
+
+        # 按距离排序，取最近的 max_neighbors 个
+        sorted_candidates = candidates[np.argsort(dists[candidates])]
+        neighbors = sorted_candidates[:max_neighbors].tolist()
+
+        relations[str(i)] = neighbors
+
+    return relations
+
+
+def print_neighbor_stats(relations: Dict[str, List[int]]) -> None:
+    """打印邻区关系统计"""
+    print("\n邻区关系统计：")
+    neighbor_counts = [len(v) for v in relations.values()]
+    print(f"  平均邻区数：{np.mean(neighbor_counts):.1f}")
+    print(f"  最少邻区数：{min(neighbor_counts)}")
+    print(f"  最多邻区数：{max(neighbor_counts)}")
+    print(f"  总射线追踪基站数（每时隙）：{np.mean(neighbor_counts) + 1:.1f}（服务小区 + 邻区）")
+    print(f"  相比全量计算的加速比：{len(relations) / (np.mean(neighbor_counts) + 1):.1f}x")
+
+
+# =========================================================
+# UE 轨迹预生成
+# =========================================================
+
+def generate_preview_trajectories(
+    bs_positions: np.ndarray,
+    scene_bounds: Tuple[float, float, float, float],
+    num_per_speed: int = 3,
+    speeds_kmh: List[float] = None,
+    seed: int = 42,
+) -> List[dict]:
+    """
+    预生成少量示例轨迹用于可视化
+
+    参数：
+        bs_positions: [num_cells, 2] 基站位置
+        scene_bounds: 场景边界
+        num_per_speed: 每种速度生成的轨迹数
+        speeds_kmh: 速度列表
+        seed: 随机种子
+
+    返回：
+        轨迹列表
+    """
+    if speeds_kmh is None:
+        speeds_kmh = [30.0, 60.0, 120.0]
+
+    # 导入轨迹生成函数
+    try:
+        from trajectory import generate_trajectory
+        from config import get_umi_config
+        cfg = get_umi_config()
+    except ImportError:
+        print("警告：无法导入轨迹生成模块，跳过轨迹预览")
+        return []
+
+    rng = np.random.default_rng(seed)
+    trajectories = []
+
+    traj_types = ["munich_walk", "street_grid", "arc"]
+
+    for speed_kmh in speeds_kmh:
+        speed_ms = speed_kmh / 3.6
+        for i in range(num_per_speed):
+            traj_type = traj_types[i % len(traj_types)]
+            try:
+                traj = generate_trajectory(
+                    cfg=cfg,
+                    speed_ms=speed_ms,
+                    traj_type=traj_type,
+                    scene_bounds=scene_bounds,
+                    bs_positions=bs_positions,
+                    rng=rng,
+                )
+                trajectories.append({
+                    "pos": traj.pos,
+                    "speed_kmh": speed_kmh,
+                    "traj_type": traj_type,
+                })
+            except Exception as e:
+                print(f"  轨迹生成失败（{speed_kmh} km/h, {traj_type}）：{e}")
+
+    return trajectories
+
+
+# =========================================================
+# 可视化
+# =========================================================
+
+SPEED_COLORS = {
+    30.0:  "#2196F3",
+    60.0:  "#FF9800",
+    120.0: "#F44336",
+}
+
+
+def visualize_network_config(
+    bs_positions: np.ndarray,
+    neighbor_relations: Dict[str, List[int]],
+    trajectories: List[dict],
+    isd: float = 250.0,
+    scene_bounds: Tuple[float, float, float, float] = SCENE_BOUNDS,
+    save_path: Optional[str] = None,
+    scene=None,
+) -> None:
+    """
+    可视化网络配置：基站 + 邻区连线 + UE 轨迹
+
+    参数：
+        bs_positions:       [num_cells, 2] 基站位置
+        neighbor_relations: 邻区关系字典
+        trajectories:       UE 轨迹列表
+        isd:                站间距 [m]
+        scene_bounds:       场景边界
+        save_path:          保存路径（None 则显示交互式窗口）
+        scene:              Sionna Scene 对象（可选，用于显示建筑物）
+    """
+    xmin, xmax, ymin, ymax = scene_bounds
+    scene_width = xmax - xmin
+    scene_height = ymax - ymin
+
+    fig_size = max(16, scene_width / 40)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size * scene_height / scene_width))
+
+    # ---- 1. 建筑物轮廓（如果有 Sionna 场景）----
+    if scene is not None:
+        try:
+            for obj_name, obj in scene.objects.items():
+                try:
+                    verts = obj.vertices
+                    if hasattr(verts, 'numpy'):
+                        verts = verts.numpy()
+                    else:
+                        verts = np.array(verts)
+
+                    if verts.ndim == 2 and verts.shape[1] >= 2 and len(verts) >= 3:
+                        z_vals = verts[:, 2] if verts.shape[1] >= 3 else np.zeros(len(verts))
+                        if np.max(z_vals) < 0.5:
+                            continue
+                        xy = verts[:, :2]
+                        from scipy.spatial import ConvexHull
+                        try:
+                            hull = ConvexHull(xy)
+                            hull_pts = np.append(hull.vertices, hull.vertices[0])
+                            ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
+                                    alpha=0.2, color="#888888", zorder=1)
+                            ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
+                                    "-", color="#555555", linewidth=0.3, alpha=0.5, zorder=2)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"  建筑物轮廓提取失败：{e}")
+    else:
+        # 显示场景边界框
+        rect = plt.Rectangle((xmin, ymin), scene_width, scene_height,
+                              fill=False, linestyle=":", color="#AAAAAA",
+                              linewidth=1, alpha=0.5, zorder=1)
+        ax.add_patch(rect)
+
+    # ---- 2. 小区覆盖范围 ----
+    for c in range(len(bs_positions)):
+        pos = bs_positions[c]
+        circle = plt.Circle((pos[0], pos[1]), isd / 2,
+                             fill=True, facecolor="#E3F2FD",
+                             linestyle="--", edgecolor="#1565C0",
+                             alpha=0.12, linewidth=0.8, zorder=3)
+        ax.add_patch(circle)
+
+    # ---- 3. 邻区连线 ----
+    drawn_pairs = set()
+    for cell_id_str, neighbors in neighbor_relations.items():
+        cell_id = int(cell_id_str)
+        if cell_id >= len(bs_positions):
+            continue
+        pos_i = bs_positions[cell_id]
+        for nb_id in neighbors:
+            if nb_id >= len(bs_positions):
+                continue
+            pair = tuple(sorted([cell_id, nb_id]))
+            if pair in drawn_pairs:
+                continue
+            drawn_pairs.add(pair)
+            pos_j = bs_positions[nb_id]
+            ax.plot([pos_i[0], pos_j[0]], [pos_i[1], pos_j[1]],
+                    "-", color="#90CAF9", linewidth=0.8, alpha=0.6, zorder=4)
+
+    # ---- 4. UE 轨迹 ----
+    speeds_shown = set()
+    for traj in trajectories:
+        speed = traj["speed_kmh"]
+        pos = traj["pos"]
+        color = SPEED_COLORS.get(speed, "#9E9E9E")
+        ax.plot(pos[:, 0], pos[:, 1],
+                color=color, linewidth=0.8, alpha=0.6, zorder=5)
+        ax.plot(pos[0, 0], pos[0, 1], "o",
+                color=color, markersize=5, alpha=0.9, zorder=6)
+        ax.plot(pos[-1, 0], pos[-1, 1], "s",
+                color=color, markersize=5, alpha=0.9, zorder=6)
+        speeds_shown.add(speed)
+
+    # ---- 5. 基站位置 ----
+    for c in range(len(bs_positions)):
+        pos = bs_positions[c]
+        ax.plot(pos[0], pos[1], "r^",
+                markersize=12, zorder=10,
+                markeredgecolor="darkred", markeredgewidth=0.5)
+        ax.annotate(
+            f"BS{c}",
+            xy=(pos[0], pos[1]),
+            xytext=(pos[0] + 10, pos[1] + 10),
+            fontsize=7, fontweight="bold", color="darkred",
+            zorder=11,
+        )
+
+    # ---- 6. 坐标轴 ----
+    ax.set_xlabel("X [m]  (East →)", fontsize=12)
+    ax.set_ylabel("Y [m]  (North ↑)", fontsize=12)
+    ax.set_title(
+        f"Network Configuration — Munich Scene\n"
+        f"{len(bs_positions)} BSs, ISD={isd}m  |  "
+        f"Neighbor lines shown  |  "
+        f"Trajectories: {len(trajectories)} preview",
+        fontsize=12,
+    )
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.2, zorder=0)
+
+    pad_x = scene_width * 0.05
+    pad_y = scene_height * 0.05
+    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+
+    ax.axhline(y=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
+    ax.axvline(x=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
+
+    # ---- 7. 图例 ----
+    legend_elements = [
+        Line2D([0], [0], marker="^", color="w", markerfacecolor="red",
+               markeredgecolor="darkred", markersize=10, label="Base Station"),
+        Line2D([0], [0], color="#90CAF9", linewidth=2, label="Neighbor link"),
+    ]
+    for speed in sorted(speeds_shown):
+        color = SPEED_COLORS.get(speed, "#9E9E9E")
+        legend_elements.append(
+            Line2D([0], [0], color=color, linewidth=2, label=f"UE {speed:.0f} km/h")
+        )
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=9, framealpha=0.9)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"配置图已保存到：{save_path}")
+    else:
+        plt.show()
+
+    plt.close()
+
+
+# =========================================================
+# GUI 模式（需要 polyscope）
+# =========================================================
+
+def run_gui_mode(cfg: dict) -> Optional[np.ndarray]:
+    """
+    启动官方 Sionna RT GUI，让用户交互式放置基站
+
+    返回：
+        基站位置数组 [num_cells, 2]，如果用户取消则返回 None
+    """
+    try:
+        import polyscope as ps
+        from sionna_rt_gui import AppHolder
+        from sionna_rt_gui.config import load_config, GuiConfig
+    except ImportError as e:
+        print(f"错误：无法导入 sionna-rt-gui（{e}）")
+        print("请安装：pip install 'polyscope>=2.6.0,<2.7.0' omegaconf")
+        print("并确保 sourceCode/sionna-rt-gui/ 在 Python 路径中")
+        return None
+
+    print("=" * 60)
+    print("Sionna RT GUI 基站配置工具")
+    print("=" * 60)
+    print("操作说明：")
+    print("  Ctrl + 左键点击：在场景中添加基站（发射机）")
+    print("  左键点击选中：选中后可拖动移动")
+    print("  Del 键：删除选中的基站")
+    print("  关闭窗口：完成配置，自动保存坐标")
+    print("=" * 60)
+
+    # 添加 sionna-rt-gui 到路径
+    gui_src = Path(__file__).parent / "sourceCode" / "sionna-rt-gui" / "src"
+    if gui_src.exists() and str(gui_src) not in sys.path:
+        sys.path.insert(0, str(gui_src))
+
+    try:
+        # 加载 GUI 配置
+        gui_cfg_path = Path(__file__).parent / "sourceCode" / "sionna-rt-gui" / "src" / "sionna_rt_gui" / "data" / "configs" / "sionna_rt_gui" / "base.yaml"
+        if gui_cfg_path.exists():
+            gui_cfg = load_config(str(gui_cfg_path), scene_filename="munich")
+        else:
+            gui_cfg = GuiConfig(scene_filename="munich")
+
+        # 禁用示例场景（我们自己放基站）
+        gui_cfg.create_example_scenario = False
+
+        # 启动 GUI
+        app = AppHolder(gui_cfg, scene_filename="munich")
+        app.show()
+
+        # GUI 关闭后，读取基站位置
+        scene = app.gui_instance.scene
+        if scene is None:
+            print("警告：场景未加载")
+            return None
+
+        transmitters = scene.transmitters
+        if not transmitters:
+            print("警告：没有放置任何基站")
+            return None
+
+        # 提取基站坐标（只取 x, y）
+        positions = []
+        for name, tx in sorted(transmitters.items()):
+            pos = tx.position.numpy().squeeze()
+            positions.append([float(pos[0]), float(pos[1])])
+            print(f"  {name}: ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f})")
+
+        print(f"\n共放置 {len(positions)} 个基站")
+        return np.array(positions, dtype=np.float32)
+
+    except Exception as e:
+        print(f"GUI 运行失败：{e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# =========================================================
+# 主函数
+# =========================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="网络配置工具：交互式配置基站位置、邻区关系和 UE 轨迹预览",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  python network_config_tool.py --gui          # 启动 3D GUI 放置基站（需要 polyscope）
+  python network_config_tool.py --no-gui       # 使用现有配置，只更新邻区和轨迹预览
+  python network_config_tool.py --no-gui --save  # 保存可视化图片
+        """
+    )
+    parser.add_argument(
+        "--gui", action="store_true", default=False,
+        help="启动 3D GUI 放置基站（需要 polyscope）"
+    )
+    parser.add_argument(
+        "--no-gui", action="store_true", default=False,
+        help="不启动 GUI，使用现有配置"
+    )
+    parser.add_argument(
+        "--save", action="store_true", default=False,
+        help="保存可视化图片到 outputs/network_config.png"
+    )
+    parser.add_argument(
+        "--max-neighbors", type=int, default=6,
+        help="每个基站的最大邻区数（默认：6）"
+    )
+    parser.add_argument(
+        "--preview-trajs", type=int, default=3,
+        help="每种速度预览的轨迹数（默认：3）"
+    )
+    args = parser.parse_args()
+
+    # 默认：如果没有指定，根据 polyscope 是否可用决定
+    if not args.gui and not args.no_gui:
+        try:
+            import polyscope
+            args.gui = True
+        except ImportError:
+            args.no_gui = True
+
+    # ---- 加载现有配置 ----
+    cfg = load_network_config()
+    print(f"加载配置文件：{NETWORK_CONFIG_PATH}")
+
+    # ---- 获取基站位置 ----
+    if args.gui:
+        print("\n启动 GUI 模式...")
+        new_positions = run_gui_mode(cfg)
+        if new_positions is not None:
+            # 更新配置中的基站位置
+            cfg["bs_config"] = cfg.get("bs_config", {})
+            cfg["bs_config"]["num_cells"] = len(new_positions)
+            cfg["bs_config"]["positions"] = [
+                {"id": i, "x": float(new_positions[i, 0]), "y": float(new_positions[i, 1])}
+                for i in range(len(new_positions))
+            ]
+            bs_positions = new_positions
+        else:
+            print("GUI 模式失败或取消，使用现有配置")
+            bs_positions = get_bs_positions_from_config(cfg)
+    else:
+        print("\n无 GUI 模式，使用现有配置")
+        bs_positions = get_bs_positions_from_config(cfg)
+
+    print(f"\n基站数量：{len(bs_positions)}")
+    print("基站位置：")
+    for i, pos in enumerate(bs_positions):
+        print(f"  BS{i}: ({pos[0]:.1f}, {pos[1]:.1f}) m")
+
+    # ---- 计算邻区关系 ----
+    print(f"\n计算邻区关系（最大邻区数：{args.max_neighbors}）...")
+    isd = cfg.get("bs_config", {}).get("isd", 250.0)
+    neighbor_relations = compute_neighbor_relations(
+        bs_positions,
+        max_neighbors=args.max_neighbors,
+        isd=isd,
+    )
+    print_neighbor_stats(neighbor_relations)
+
+    # 更新配置
+    cfg["neighbor_config"] = {
+        "max_neighbors": args.max_neighbors,
+        "method": "distance",
+        "relations": neighbor_relations,
+    }
+
+    # ---- 预生成 UE 轨迹 ----
+    print(f"\n预生成示例轨迹（每种速度 {args.preview_trajs} 条）...")
+    trajectories = generate_preview_trajectories(
+        bs_positions=bs_positions,
+        scene_bounds=SCENE_BOUNDS,
+        num_per_speed=args.preview_trajs,
+        speeds_kmh=cfg.get("trajectory_config", {}).get("speeds_kmh", [30.0, 60.0, 120.0]),
+        seed=cfg.get("trajectory_config", {}).get("seed", 42),
+    )
+    print(f"  生成了 {len(trajectories)} 条示例轨迹")
+
+    # ---- 保存配置 ----
+    save_network_config(cfg)
+
+    # ---- 可视化 ----
+    print("\n生成可视化图...")
+
+    # 尝试加载 Sionna 场景（用于显示建筑物）
+    scene = None
+    try:
+        import sionna
+        import sionna.rt as srt
+        from sionna.rt import load_scene, PlanarArray
+        print("  加载 Sionna 场景（用于显示建筑物）...")
+        scene = load_scene(getattr(srt.scene, "munich"))
+        scene.tx_array = PlanarArray(num_rows=1, num_cols=1,
+                                      vertical_spacing=0.5, horizontal_spacing=0.5,
+                                      pattern="iso", polarization="V")
+        scene.rx_array = PlanarArray(num_rows=1, num_cols=1,
+                                      vertical_spacing=0.5, horizontal_spacing=0.5,
+                                      pattern="iso", polarization="V")
+        print("  场景加载完成")
+    except Exception as e:
+        print(f"  场景加载失败（{e}），不显示建筑物背景")
+
+    save_path = None
+    if args.save:
+        output_dir = Path(__file__).parent / "outputs"
+        output_dir.mkdir(exist_ok=True)
+        save_path = str(output_dir / "network_config.png")
+
+    visualize_network_config(
+        bs_positions=bs_positions,
+        neighbor_relations=neighbor_relations,
+        trajectories=trajectories,
+        isd=isd,
+        scene_bounds=SCENE_BOUNDS,
+        save_path=save_path,
+        scene=scene,
+    )
+
+    # ---- 打印下一步操作 ----
+    print("\n" + "=" * 60)
+    print("配置完成！下一步：")
+    print("1. 查看可视化图，确认基站位置和轨迹是否合理")
+    print("2. 如需调整基站位置，修改 network_config.json 中的 bs_config.positions")
+    print("   然后重新运行：python network_config_tool.py --no-gui")
+    print("3. 确认后运行仿真：python generate_dataset.py")
+    print("=" * 60)
+
+    # 打印 bs_positions_override 代码（方便复制到 config.py）
+    print("\n如需在 config.py 中手动指定基站位置，复制以下代码：")
+    print("bs_positions_override = np.array([")
+    for i, pos in enumerate(bs_positions):
+        print(f"    [{pos[0]:.1f}, {pos[1]:.1f}],  # BS{i}")
+    print("], dtype=np.float32)")
+
+
+if __name__ == "__main__":
+    main()

@@ -1100,6 +1100,10 @@ class SionnaRtGui:
             if clicked:
                 self.clear_radio_devices()
 
+            psim.SameLine()
+            if psim.Button("Export BS → JSON"):
+                self._export_bs_config()
+
             psim.Spacing()
 
         if psim.CollapsingHeader("Radio map", psim.ImGuiTreeNodeFlags_DefaultOpen):
@@ -1401,6 +1405,108 @@ class SionnaRtGui:
                         self.slice_plane.set_draw_widget(gizmo_active)
 
         psim.End()  # End main Sionna RT window
+
+    def _export_bs_config(self) -> None:
+        """
+        将当前场景中所有发射机（基站）的 x/y 坐标导出到 network_config.json。
+
+        - z 坐标统一替换为 config.py 中的 h_bs（默认 10m），忽略 GUI 中的 z 值
+        - 自动计算邻区关系（基于距离）
+        - 保存到项目根目录的 network_config.json
+        """
+        import json
+        from pathlib import Path
+
+        if not self.scene or not self.scene._transmitters:
+            print("[Export] No transmitters in scene. Place BSs first (Ctrl+click).")
+            return
+
+        # 读取 h_bs（从 config.py）
+        try:
+            # 尝试从项目根目录导入 config.py
+            project_root = Path(__file__).parent.parent.parent.parent.parent
+            import sys as _sys
+            if str(project_root) not in _sys.path:
+                _sys.path.insert(0, str(project_root))
+            from config import get_umi_config
+            h_bs = get_umi_config().h_bs
+        except Exception:
+            h_bs = 10.0  # 默认值
+
+        # 提取基站 x/y 坐标（按名称排序，保证顺序一致）
+        positions = []
+        for i, (name, tx) in enumerate(sorted(self.scene._transmitters.items())):
+            pos = tx.position.numpy().squeeze()
+            positions.append({
+                "id": i,
+                "x": round(float(pos[0]), 2),
+                "y": round(float(pos[1]), 2),
+                "comment": name,
+            })
+
+        num_cells = len(positions)
+
+        # 计算邻区关系（基于距离，最近 6 个）
+        import numpy as _np
+        bs_xy = _np.array([[p["x"], p["y"]] for p in positions], dtype=_np.float32)
+        max_neighbors = min(6, num_cells - 1)
+        neighbor_relations = {}
+        for i in range(num_cells):
+            dists = _np.linalg.norm(bs_xy - bs_xy[i], axis=1)
+            dists[i] = _np.inf
+            sorted_idx = _np.argsort(dists)[:max_neighbors].tolist()
+            neighbor_relations[str(i)] = sorted_idx
+
+        # 读取现有配置（保留其他字段）
+        config_path = project_root / "network_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+            except Exception:
+                cfg_data = {}
+        else:
+            cfg_data = {}
+
+        # 更新基站配置
+        cfg_data["bs_config"] = {
+            "num_cells": num_cells,
+            "isd": round(float(_np.mean([
+                _np.linalg.norm(bs_xy[i] - bs_xy[j])
+                for i in range(num_cells)
+                for j in neighbor_relations[str(i)][:1]
+            ])), 1) if num_cells > 1 else 200.0,
+            "h_bs": h_bs,
+            "positions": positions,
+        }
+
+        # 更新邻区配置
+        cfg_data["neighbor_config"] = {
+            "max_neighbors": max_neighbors,
+            "method": "distance",
+            "relations": neighbor_relations,
+        }
+
+        # 更新元数据
+        import datetime
+        cfg_data["_metadata"] = {
+            "created_by": "sionna-rt-gui Export BS button",
+            "version": "1.0",
+            "last_modified": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+
+        # 保存
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg_data, f, indent=2, ensure_ascii=False)
+
+        # 打印结果
+        print(f"\n[Export] {num_cells} BSs exported to: {config_path}")
+        print(f"[Export] BS height (z): {h_bs}m (from config.py, GUI z ignored)")
+        print("[Export] Positions (x, y):")
+        for p in positions:
+            print(f"  BS{p['id']:2d}: ({p['x']:8.2f}, {p['y']:8.2f})  [{p['comment']}]")
+        print(f"[Export] Neighbor relations computed (max {max_neighbors} per BS)")
+        print("[Export] Done. Run: python network_config_tool.py --no-gui --save")
 
     def _gui_features_checkboxes(
         self, cfg: RadioMapConfig | PathsConfig, suffix: str

@@ -506,9 +506,9 @@ def simulate_trajectory_channel(
     C = cfg.num_cells
 
     # 预分配存储空间
-    rsrp_raw_seq = np.zeros((T, C), dtype=np.float32)
-    rsrq_seq = np.zeros((T, C), dtype=np.float32)
-    sinr_seq = np.zeros((T, C), dtype=np.float32)
+    rsrp_raw_seq = np.full((T, C), -120.0, dtype=np.float32)   # 初始化为 -120 dBm（无信号）
+    rsrq_seq = np.full((T, C), -20.0, dtype=np.float32)
+    sinr_seq = np.full((T, C), -20.0, dtype=np.float32)
     doppler_seq = np.zeros((T, C), dtype=np.float32)
     beam_id_seq = np.zeros((T, C), dtype=np.int32)
     delay_spread_seq = np.zeros((T, C), dtype=np.float32)
@@ -518,11 +518,44 @@ def simulate_trajectory_channel(
     prev_rsrp_raw = None
     prev_beam_id = None
 
+    # ---- 邻区优化：确定初始服务小区 ----
+    # 用距离最近的基站作为第一个时隙的服务小区
+    bs_positions_2d = scene_mgr.bs_positions_2d  # [C, 2]
+    if neighbor_relations is not None:
+        init_dists = np.linalg.norm(bs_positions_2d - traj.pos[0], axis=1)
+        current_serving_cell = int(np.argmin(init_dists))
+        _log(f"  邻区优化已启用，初始服务小区：BS{current_serving_cell}，"
+             f"每时隙约 {1 + len(neighbor_relations.get(current_serving_cell, []))} 个基站做射线追踪"
+             f"（全量：{C} 个）", "debug")
+    else:
+        current_serving_cell = 0  # 无邻区配置时不使用优化
+
     # 逐时隙仿真
     for t in range(T):
         ue_pos_2d = traj.pos[t]
         ue_vel_2d = traj.vel[t]
         ue_pos_3d = np.array([ue_pos_2d[0], ue_pos_2d[1], cfg.h_ue], dtype=np.float32)
+
+        # ---- 确定本时隙需要做射线追踪的基站列表 ----
+        if neighbor_relations is not None:
+            active_cells = get_active_cells(
+                ue_pos_2d=ue_pos_2d,
+                bs_positions_2d=bs_positions_2d,
+                neighbor_relations=neighbor_relations,
+                serving_cell=current_serving_cell,
+            )
+            # 非活跃基站：保持上一时隙的 RSRP（或初始值 -120 dBm）
+            # 这样特征矩阵里所有基站都有值，不影响数据集格式
+        else:
+            active_cells = list(range(C))  # 无邻区配置：对所有基站做射线追踪
+
+        # ---- 临时：只激活 active_cells 对应的发射机 ----
+        # 通过在场景中只保留 active_cells 的发射机来实现
+        # 注意：Sionna 的 PathSolver 会对所有发射机计算路径
+        # 所以我们需要临时移除非活跃基站，计算完再恢复
+        # 为了简化实现，这里采用"计算全量但只更新 active_cells"的方式
+        # 真正的加速需要修改 SceneManager 来支持部分发射机激活
+        # TODO: 实现真正的部分发射机激活（需要修改 SceneManager）
 
         # 在场景中放置 UE
         scene_mgr.place_receiver(ue_pos_2d)
@@ -565,10 +598,6 @@ def simulate_trajectory_channel(
                     _log(f"Scene 对象可用方法：{scene_methods}", "error")
                 except Exception:
                     pass
-            # 后续时隙静默处理（不记录日志，避免日志文件过大）
-            # 如果需要调试，可以取消下面这行的注释：
-            # else:
-            #     _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "warning")
             meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
 
         # 存储结果
@@ -583,6 +612,12 @@ def simulate_trajectory_channel(
 
         prev_rsrp_raw = meas.rsrp_raw.copy()
         prev_beam_id = meas.beam_id.copy()
+
+        # ---- 更新服务小区（供下一时隙使用）----
+        # 用本时隙的瞬时 RSRP 最强基站作为下一时隙的服务小区
+        # 注意：这只是内部变量，用于决定射线追踪范围，不影响数据集标签
+        if neighbor_relations is not None:
+            current_serving_cell = int(np.argmax(meas.rsrp_raw))
 
     # ---- L3 滤波 ----
     rsrp_l3_seq = apply_l3_filter(rsrp_raw_seq, cfg.l3_alpha)

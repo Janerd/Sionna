@@ -250,12 +250,25 @@ def visualize_network_config(
         save_path:          保存路径（None 则显示交互式窗口）
         scene:              Sionna Scene 对象（可选，用于显示建筑物）
     """
-    xmin, xmax, ymin, ymax = scene_bounds
+    # 坐标轴范围：取场景边界和基站实际范围的并集，确保所有基站都显示
+    xmin_scene, xmax_scene, ymin_scene, ymax_scene = scene_bounds
+    if len(bs_positions) > 0:
+        bs_margin = isd * 0.6
+        xmin = min(xmin_scene, float(bs_positions[:, 0].min()) - bs_margin)
+        xmax = max(xmax_scene, float(bs_positions[:, 0].max()) + bs_margin)
+        ymin = min(ymin_scene, float(bs_positions[:, 1].min()) - bs_margin)
+        ymax = max(ymax_scene, float(bs_positions[:, 1].max()) + bs_margin)
+    else:
+        xmin, xmax, ymin, ymax = xmin_scene, xmax_scene, ymin_scene, ymax_scene
+
     scene_width = xmax - xmin
     scene_height = ymax - ymin
 
-    fig_size = max(16, scene_width / 40)
-    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size * scene_height / scene_width))
+    # 图形尺寸：固定 20 英寸宽，保持宽高比
+    fig_w = 20
+    fig_h = max(16, fig_w * scene_height / scene_width)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    ax.tick_params(labelsize=11)
 
     # ---- 1. 建筑物轮廓（如果有 Sionna 场景）----
     if scene is not None:
@@ -278,9 +291,9 @@ def visualize_network_config(
                             hull = ConvexHull(xy)
                             hull_pts = np.append(hull.vertices, hull.vertices[0])
                             ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    alpha=0.2, color="#888888", zorder=1)
+                                    alpha=0.25, color="#888888", zorder=1)
                             ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    "-", color="#555555", linewidth=0.3, alpha=0.5, zorder=2)
+                                    "-", color="#555555", linewidth=0.5, alpha=0.6, zorder=2)
                         except Exception:
                             pass
                 except Exception:
@@ -288,11 +301,14 @@ def visualize_network_config(
         except Exception as e:
             print(f"  建筑物轮廓提取失败：{e}")
     else:
-        # 显示场景边界框
-        rect = plt.Rectangle((xmin, ymin), scene_width, scene_height,
-                              fill=False, linestyle=":", color="#AAAAAA",
-                              linewidth=1, alpha=0.5, zorder=1)
+        # 显示场景边界框（用实线，更清晰）
+        rect = plt.Rectangle((xmin_scene, ymin_scene),
+                              xmax_scene - xmin_scene, ymax_scene - ymin_scene,
+                              fill=False, linestyle="--", color="#888888",
+                              linewidth=1.5, alpha=0.7, zorder=1)
         ax.add_patch(rect)
+        ax.text(xmin_scene + 10, ymax_scene - 30, "Munich Scene boundary (±500m)",
+                fontsize=10, color="#888888", va="top")
 
     # ---- 2. 小区覆盖范围 ----
     for c in range(len(bs_positions)):
@@ -300,7 +316,7 @@ def visualize_network_config(
         circle = plt.Circle((pos[0], pos[1]), isd / 2,
                              fill=True, facecolor="#E3F2FD",
                              linestyle="--", edgecolor="#1565C0",
-                             alpha=0.12, linewidth=0.8, zorder=3)
+                             alpha=0.15, linewidth=1.2, zorder=3)
         ax.add_patch(circle)
 
     # ---- 3. 邻区连线 ----
@@ -319,7 +335,7 @@ def visualize_network_config(
             drawn_pairs.add(pair)
             pos_j = bs_positions[nb_id]
             ax.plot([pos_i[0], pos_j[0]], [pos_i[1], pos_j[1]],
-                    "-", color="#90CAF9", linewidth=0.8, alpha=0.6, zorder=4)
+                    "-", color="#1976D2", linewidth=1.5, alpha=0.5, zorder=4)
 
     # ---- 4. UE 轨迹 ----
     speeds_shown = set()
@@ -328,60 +344,63 @@ def visualize_network_config(
         pos = traj["pos"]
         color = SPEED_COLORS.get(speed, "#9E9E9E")
         ax.plot(pos[:, 0], pos[:, 1],
-                color=color, linewidth=0.8, alpha=0.6, zorder=5)
+                color=color, linewidth=1.2, alpha=0.65, zorder=5)
         ax.plot(pos[0, 0], pos[0, 1], "o",
-                color=color, markersize=5, alpha=0.9, zorder=6)
+                color=color, markersize=7, alpha=0.9, zorder=6,
+                markeredgecolor="white", markeredgewidth=0.5)
         ax.plot(pos[-1, 0], pos[-1, 1], "s",
-                color=color, markersize=5, alpha=0.9, zorder=6)
+                color=color, markersize=7, alpha=0.9, zorder=6,
+                markeredgecolor="white", markeredgewidth=0.5)
         speeds_shown.add(speed)
 
     # ---- 5. 基站位置 ----
     for c in range(len(bs_positions)):
         pos = bs_positions[c]
         ax.plot(pos[0], pos[1], "r^",
-                markersize=12, zorder=10,
-                markeredgecolor="darkred", markeredgewidth=0.5)
+                markersize=16, zorder=10,
+                markeredgecolor="darkred", markeredgewidth=1.0)
         ax.annotate(
             f"BS{c}",
             xy=(pos[0], pos[1]),
-            xytext=(pos[0] + 10, pos[1] + 10),
-            fontsize=7, fontweight="bold", color="darkred",
+            xytext=(pos[0] + 12, pos[1] + 12),
+            fontsize=9, fontweight="bold", color="darkred",
             zorder=11,
         )
 
     # ---- 6. 坐标轴 ----
-    ax.set_xlabel("X [m]  (East →)", fontsize=12)
-    ax.set_ylabel("Y [m]  (North ↑)", fontsize=12)
+    ax.set_xlabel("X [m]  (East →)", fontsize=13)
+    ax.set_ylabel("Y [m]  (North ↑)", fontsize=13)
     ax.set_title(
         f"Network Configuration — Munich Scene\n"
         f"{len(bs_positions)} BSs, ISD={isd}m  |  "
-        f"Neighbor lines shown  |  "
+        f"Blue lines = neighbor links  |  "
         f"Trajectories: {len(trajectories)} preview",
-        fontsize=12,
+        fontsize=13,
     )
     ax.set_aspect("equal")
-    ax.grid(True, alpha=0.2, zorder=0)
+    ax.grid(True, alpha=0.25, zorder=0, linewidth=0.8)
 
-    pad_x = scene_width * 0.05
-    pad_y = scene_height * 0.05
-    ax.set_xlim(xmin - pad_x, xmax + pad_x)
-    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+    # 坐标轴范围：包含所有基站 + 5% 边距
+    pad = max(scene_width, scene_height) * 0.03
+    ax.set_xlim(xmin - pad, xmax + pad)
+    ax.set_ylim(ymin - pad, ymax + pad)
 
-    ax.axhline(y=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
-    ax.axvline(x=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
+    ax.axhline(y=0, color="k", linewidth=0.8, alpha=0.3, zorder=0)
+    ax.axvline(x=0, color="k", linewidth=0.8, alpha=0.3, zorder=0)
 
     # ---- 7. 图例 ----
     legend_elements = [
         Line2D([0], [0], marker="^", color="w", markerfacecolor="red",
-               markeredgecolor="darkred", markersize=10, label="Base Station"),
-        Line2D([0], [0], color="#90CAF9", linewidth=2, label="Neighbor link"),
+               markeredgecolor="darkred", markersize=13, label="Base Station"),
+        Line2D([0], [0], color="#1976D2", linewidth=2.5, label="Neighbor link"),
     ]
     for speed in sorted(speeds_shown):
         color = SPEED_COLORS.get(speed, "#9E9E9E")
         legend_elements.append(
-            Line2D([0], [0], color=color, linewidth=2, label=f"UE {speed:.0f} km/h")
+            Line2D([0], [0], color=color, linewidth=2.5, label=f"UE {speed:.0f} km/h")
         )
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=9, framealpha=0.9)
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=11,
+              framealpha=0.9, markerscale=1.2)
 
     plt.tight_layout()
 

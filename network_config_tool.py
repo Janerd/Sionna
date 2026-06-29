@@ -566,22 +566,39 @@ def main():
     for i, pos in enumerate(bs_positions):
         print(f"  BS{i}: ({pos[0]:.1f}, {pos[1]:.1f}) m")
 
-    # ---- 计算邻区关系 ----
-    print(f"\n计算邻区关系（最大邻区数：{args.max_neighbors}）...")
+    # ---- 邻区关系：优先保留手动配置，只在必要时重新计算 ----
     isd = cfg.get("bs_config", {}).get("isd", 250.0)
-    neighbor_relations = compute_neighbor_relations(
-        bs_positions,
-        max_neighbors=args.max_neighbors,
-        isd=isd,
-    )
-    print_neighbor_stats(neighbor_relations)
+    existing_relations = cfg.get("neighbor_config", {}).get("relations", None)
+    existing_num_cells = len(existing_relations) if existing_relations else 0
+    current_num_cells = len(bs_positions)
 
-    # 更新配置
-    cfg["neighbor_config"] = {
-        "max_neighbors": args.max_neighbors,
-        "method": "distance",
-        "relations": neighbor_relations,
-    }
+    if existing_relations and existing_num_cells == current_num_cells and not args.gui:
+        # 基站数量没变，且不是 GUI 模式（没有重新放置基站）
+        # 保留手动修改的邻区关系，不重新计算
+        neighbor_relations = {int(k): [int(v) for v in vals]
+                              for k, vals in existing_relations.items()}
+        print(f"\n保留现有邻区关系（{existing_num_cells} 个基站，手动配置不会被覆盖）")
+        print_neighbor_stats(neighbor_relations)
+    else:
+        # 基站数量变化，或者是 GUI 模式重新放置了基站，重新计算邻区关系
+        if existing_relations and existing_num_cells != current_num_cells:
+            print(f"\n基站数量变化（{existing_num_cells} → {current_num_cells}），重新计算邻区关系...")
+        else:
+            print(f"\n计算邻区关系（最大邻区数：{args.max_neighbors}）...")
+
+        neighbor_relations = compute_neighbor_relations(
+            bs_positions,
+            max_neighbors=args.max_neighbors,
+            isd=isd,
+        )
+        print_neighbor_stats(neighbor_relations)
+
+        # 更新配置（只在重新计算时才写入）
+        cfg["neighbor_config"] = {
+            "max_neighbors": args.max_neighbors,
+            "method": "distance",
+            "relations": {str(k): v for k, v in neighbor_relations.items()},
+        }
 
     # ---- 预生成 UE 轨迹 ----
     print(f"\n预生成示例轨迹（每种速度 {args.preview_trajs} 条）...")

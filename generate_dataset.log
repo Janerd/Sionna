@@ -1,12 +1,17 @@
 jitc_llvm_init(): LLVM API initialization failed ..
+[polyscope] Backend: openGL3_glfw -- Loaded openGL version: 3.3.0 NVIDIA 591.86
+[!] Exception thrown in app.tick(): [parser.cpp:1718] At dictionary node "emitter": failed to instantiate emitter plugin of type "envmap": [FileStream] "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\envmaps\teufelsberg_ground_2_1k.exr": I/O error while attempting to open file: No such file or directory
 Traceback (most recent call last):
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\run.py", line 68, in <module>
-    main()
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\run.py", line 53, in main
-    cfg = load_config(args.config, scene_filename=args.scene)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\config.py", line 294, in load_config
-    raise FileNotFoundError(
-FileNotFoundError: Config file not found: C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\configs\sionna_rt_gui\base.yaml, tried:
-- C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\configs\sionna_rt_gui\base.yaml
-- C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\configs\sionna_rt_gui\base.yaml
+  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\reload.py", line 142, in tick
+    self.app.tick()
+  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\gui.py", line 464, in tick
+    new_img, aovs, self.render_cache = render_scene(
+                                       ^^^^^^^^^^^^^
+  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\rendering.py", line 247, in render_scene
+    cache = setup_scene_for_rendering(cfg, scene, use_denoiser=use_denoiser)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\rendering.py", line 75, in setup_scene_for_rendering
+    visual_scene = mi.load_dict(visual_scene_dict)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: [parser.cpp:1718] At dictionary node "emitter": failed to instantiate emitter plugin of type "envmap": [FileStream] "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\envmaps\teufelsberg_ground_2_1k.exr": I/O error while attempting to open file: No such file or directory
+

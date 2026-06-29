@@ -448,11 +448,17 @@ class SceneManager:
 
     @property
     def scene_bounds(self) -> Tuple[float, float, float, float]:
-        """返回场景的 2D 边界 [xmin, xmax, ymin, ymax]"""
+        """
+        返回场景的 2D 边界 [xmin, xmax, ymin, ymax]
+
+        优先使用从场景对象获取的实际边界，
+        否则使用慕尼黑场景的默认范围 ±500m。
+        注意：不再使用 ISD 估算，避免基站数量变化时边界不一致。
+        """
         if self._scene_bbox is not None:
             return self._scene_bbox
-        margin = self.cfg.isd * 2.5
-        return (-margin, margin, -margin, margin)
+        # 慕尼黑场景默认范围 ±500m
+        return (-500.0, 500.0, -500.0, 500.0)
 
     def update_bs_positions(self, new_positions_2d: np.ndarray) -> None:
         """更新基站位置"""
@@ -474,13 +480,18 @@ class SceneManager:
 
     def visualize(self, save_path: Optional[str] = None, use_english: bool = True) -> None:
         """可视化基站布局（仅显示基站位置和覆盖范围，无地图背景）"""
-        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        # 图形尺寸根据场景范围自动调整，确保不漏显示
+        xmin, xmax, ymin, ymax = self.scene_bounds
+        scene_width = xmax - xmin
+        scene_height = ymax - ymin
+        fig_size = max(12, scene_width / 50)  # 每 50m 对应 1 英寸，最小 12 英寸
+        fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size * scene_height / scene_width))
 
         for c in range(self.cfg.num_cells):
             pos = self.bs_positions_2d[c]
-            ax.plot(pos[0], pos[1], "r^", markersize=12, zorder=5)
+            ax.plot(pos[0], pos[1], "r^", markersize=10, zorder=5)
             ax.annotate(f"BS{c}", xy=(pos[0], pos[1]),
-                        xytext=(pos[0] + 5, pos[1] + 5), fontsize=8)
+                        xytext=(pos[0] + 8, pos[1] + 8), fontsize=7)
 
         for c in range(self.cfg.num_cells):
             pos = self.bs_positions_2d[c]
@@ -494,9 +505,9 @@ class SceneManager:
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.3)
 
-        xmin, xmax, ymin, ymax = self.scene_bounds
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
+        # 使用完整场景范围，确保所有基站都显示
+        ax.set_xlim(xmin - 20, xmax + 20)
+        ax.set_ylim(ymin - 20, ymax + 20)
 
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -600,8 +611,9 @@ class SceneManager:
         ax.grid(True, alpha=0.3, zorder=0)
 
         xmin, xmax, ymin, ymax = self.scene_bounds
-        ax.set_xlim(xmin * 1.1, xmax * 1.1)
-        ax.set_ylim(ymin * 1.1, ymax * 1.1)
+        # 使用完整场景范围 + 10% 边距，确保所有基站都显示
+        ax.set_xlim(xmin - abs(xmin) * 0.1, xmax + abs(xmax) * 0.1)
+        ax.set_ylim(ymin - abs(ymin) * 0.1, ymax + abs(ymax) * 0.1)
 
         ax.axhline(y=0, color="k", linewidth=0.5, alpha=0.3)
         ax.axvline(x=0, color="k", linewidth=0.5, alpha=0.3)

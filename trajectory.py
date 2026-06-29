@@ -134,21 +134,29 @@ def generate_trajectory(
         rng = np.random.default_rng()
 
     # 计算轨迹时隙数（速度自适应）
-    # 目标：UE 穿越约 1.5 个 ISD 的距离
-    target_dist = cfg.isd * 1.5
+    # 目标：UE 穿越约 4 个 ISD 的距离，确保经历多次切换
+    # 30 km/h：约 4320 slots（约 3 分钟，穿越 1000m）
+    # 60 km/h：约 2160 slots（约 1.5 分钟，穿越 1000m）
+    # 120 km/h：约 1080 slots（约 45 秒，穿越 1000m）
+    target_dist = cfg.isd * 4.0
     dist_per_slot = speed_ms * cfg.slot_duration
     num_slots = min(int(math.ceil(target_dist / dist_per_slot)), 5000)
     num_slots = max(num_slots, cfg.window_size + cfg.pred_horizon + 10)
 
-    # 选择起点（在某个基站附近随机偏移）
-    # 注意：起点应在街道上，而非建筑物内
-    # 当前实现：在基站附近随机偏移，假设基站在街道上
+    # 选择起点（对齐到街道网格交叉口，避免起点在建筑物内）
+    # 慕尼黑街道间距约 80m，交叉口在 (n×80, m×80) 处
+    # 在基站附近选择最近的街道交叉口作为起点
+    STREET_GRID_SIZE = 80.0  # 慕尼黑典型街区长度 [m]
     anchor_idx = rng.integers(0, len(bs_positions))
     anchor_pos = bs_positions[anchor_idx]
-    r0 = 0.45 * cfg.isd * math.sqrt(float(rng.random()))
-    theta0 = float(rng.random()) * 2 * math.pi
-    x0 = float(anchor_pos[0]) + r0 * math.cos(theta0)
-    y0 = float(anchor_pos[1]) + r0 * math.sin(theta0)
+
+    # 对齐到最近的街道交叉口
+    x0 = round(float(anchor_pos[0]) / STREET_GRID_SIZE) * STREET_GRID_SIZE
+    y0 = round(float(anchor_pos[1]) / STREET_GRID_SIZE) * STREET_GRID_SIZE
+
+    # 加小随机偏移（±15m），模拟 UE 不在正中心，但仍在街道上
+    x0 += float(rng.uniform(-15, 15))
+    y0 += float(rng.uniform(-15, 15))
 
     # 限制起点在场景边界内
     xmin, xmax, ymin, ymax = scene_bounds

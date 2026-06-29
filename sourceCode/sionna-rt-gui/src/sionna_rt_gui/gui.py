@@ -1415,23 +1415,57 @@ class SionnaRtGui:
         - 保存到项目根目录的 network_config.json
         """
         import json
+        import traceback
+        from pathlib import Path
+
+        print("\n[Export] Button clicked!")
+
+        try:
+            self._do_export_bs_config()
+        except Exception as e:
+            print(f"[Export] ERROR: {e}")
+            traceback.print_exc()
+
+    def _do_export_bs_config(self) -> None:
+        """实际执行导出逻辑"""
+        import json
         from pathlib import Path
 
         if not self.scene or not self.scene._transmitters:
             print("[Export] No transmitters in scene. Place BSs first (Ctrl+click).")
             return
 
-        # 读取 h_bs（从 config.py）
+        # 确定项目根目录
+        # 优先使用当前工作目录（GUI 从项目根目录启动时 cwd = 项目根目录）
+        # 备选：向上查找包含 generate_dataset.py 的目录
+        import os
+        cwd = Path(os.getcwd())
+        if (cwd / "generate_dataset.py").exists():
+            project_root = cwd
+        else:
+            # 从 gui.py 向上查找
+            candidate = Path(__file__).resolve()
+            project_root = None
+            for _ in range(8):
+                candidate = candidate.parent
+                if (candidate / "generate_dataset.py").exists():
+                    project_root = candidate
+                    break
+            if project_root is None:
+                project_root = cwd  # 兜底
+
+        print(f"[Export] Project root: {project_root}")
+
         try:
-            # 尝试从项目根目录导入 config.py
-            project_root = Path(__file__).parent.parent.parent.parent.parent
             import sys as _sys
             if str(project_root) not in _sys.path:
                 _sys.path.insert(0, str(project_root))
             from config import get_umi_config
             h_bs = get_umi_config().h_bs
-        except Exception:
+            print(f"[Export] h_bs from config.py: {h_bs}m")
+        except Exception as e:
             h_bs = 10.0  # 默认值
+            print(f"[Export] Could not load config.py ({e}), using h_bs=10m")
 
         # 提取基站 x/y 坐标（按名称排序，保证顺序一致）
         positions = []
@@ -1500,7 +1534,7 @@ class SionnaRtGui:
             json.dump(cfg_data, f, indent=2, ensure_ascii=False)
 
         # 打印结果
-        print(f"\n[Export] {num_cells} BSs exported to: {config_path}")
+        print(f"\n[Export] SUCCESS! {num_cells} BSs exported to: {config_path}")
         print(f"[Export] BS height (z): {h_bs}m (from config.py, GUI z ignored)")
         print("[Export] Positions (x, y):")
         for p in positions:

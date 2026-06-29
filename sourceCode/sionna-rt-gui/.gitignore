@@ -17,7 +17,6 @@ scenes/**/*.obj
 scenes/**/*.xml
 
 # Data directories
-data/
 cache/
 overpass/
 

@@ -35,10 +35,70 @@ from typing import Dict, List, Tuple
 import numpy as np
 from tqdm import tqdm
 
+import json
+
 from config import SimConfig, get_umi_config, get_uma_config
 from scene_setup import SceneManager, compute_hexagonal_bs_positions, get_bs_positions
 from trajectory import Trajectory, generate_all_trajectories
 from channel import simulate_trajectory_channel, load_neighbor_relations
+
+
+# =========================================================
+# 从 network_config.json 加载并覆盖仿真配置
+# =========================================================
+
+def apply_network_config(cfg: SimConfig, network_config_path: Path) -> SimConfig:
+    """
+    从 network_config.json 读取基站配置，覆盖 cfg 中的相关参数。
+
+    这样只需修改 network_config.json，不需要同时修改 config.py。
+    支持随时修改基站数量、坐标和邻区关系。
+
+    参数：
+        cfg:                  仿真配置（来自 config.py）
+        network_config_path:  network_config.json 路径
+
+    返回：
+        更新后的 cfg
+    """
+    if not network_config_path.exists():
+        return cfg
+
+    try:
+        with open(network_config_path, "r", encoding="utf-8") as f:
+            net_cfg = json.load(f)
+    except Exception as e:
+        print(f"警告：无法读取 network_config.json（{e}），使用 config.py 默认值")
+        return cfg
+
+    bs_cfg = net_cfg.get("bs_config", {})
+    positions = bs_cfg.get("positions", [])
+
+    if not positions:
+        return cfg
+
+    # 覆盖基站数量
+    num_cells = len(positions)
+    if num_cells != cfg.num_cells:
+        print(f"[network_config] 基站数量：{cfg.num_cells} → {num_cells}（来自 network_config.json）")
+        cfg.num_cells = num_cells
+
+    # 覆盖 ISD（如果有）
+    if "isd" in bs_cfg:
+        cfg.isd = float(bs_cfg["isd"])
+
+    # 覆盖基站高度（如果有）
+    if "h_bs" in bs_cfg:
+        cfg.h_bs = float(bs_cfg["h_bs"])
+
+    # 覆盖基站坐标（设置 bs_positions_override）
+    cfg.bs_positions_override = np.array(
+        [[float(p["x"]), float(p["y"])] for p in positions],
+        dtype=np.float32,
+    )
+    print(f"[network_config] 已加载 {num_cells} 个基站坐标（来自 network_config.json）")
+
+    return cfg
 
 
 # =========================================================
@@ -446,6 +506,10 @@ def main():
         cfg = get_umi_config()
     else:
         cfg = get_uma_config()
+
+    # ---- 从 network_config.json 覆盖基站配置（优先级高于 config.py）----
+    network_config_path = Path(__file__).parent / "network_config.json"
+    cfg = apply_network_config(cfg, network_config_path)
 
     if args.num_traj is not None:
         cfg.num_trajectories = args.num_traj

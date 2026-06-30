@@ -682,6 +682,146 @@ class SceneManager:
         margin = max(50.0, self.cfg.isd * 0.5)
         return (xmin + margin, xmax - margin, ymin + margin, ymax - margin)
 
+    def compute_walkable_grid(
+        self,
+        grid_size: float = 2.0,
+        cache_path: Optional[str] = None,
+    ) -> dict:
+        """
+        从建筑物网格提取可行走区域（街道 = True，建筑物内 = False）。
+
+        使用与建筑物投影相同的 Mitsuba API：
+            mesh.vertex_positions_buffer() + mesh.faces_buffer()
+
+        参数：
+            grid_size:   网格分辨率 [m]（默认 2m，±500m 场景 = 500×500 格）
+            cache_path:  缓存文件路径（None 则不缓存）
+
+        返回：
+            {
+              "grid":      np.ndarray [H, W] bool，True = 可行走（街道）
+              "origin":    (xmin, ymin)，网格左下角坐标 [m]
+              "grid_size": float，每格大小 [m]
+            }
+        """
+        if not self._is_setup or self.scene is None:
+            raise RuntimeError("请先调用 setup() 初始化场景")
+
+        # 尝试从缓存加载
+        if cache_path is not None:
+            cache_file = Path(cache_path)
+            if cache_file.exists():
+                try:
+                    data = np.load(cache_file)
+                    print(f"从缓存加载可行走网格：{cache_file}")
+                    return {
+                        "grid": data["grid"],
+                        "origin": tuple(data["origin"]),
+                        "grid_size": float(data["grid_size"]),
+                    }
+                except Exception:
+                    pass
+
+        print(f"计算可行走网格（分辨率 {grid_size}m）...")
+
+        xmin, xmax, ymin, ymax = self.scene_bounds
+        W = int(np.ceil((xmax - xmin) / grid_size))
+        H = int(np.ceil((ymax - ymin) / grid_size))
+        origin = (xmin, ymin)
+
+        # 初始化：全部可行走
+        walkable = np.ones((H, W), dtype=bool)
+
+        # 从建筑物网格提取占地，标记为不可行走
+        building_count = 0
+        try:
+            from matplotlib.path import Path as MplPath
+
+            for mesh in self.scene.mi_scene.shapes():
+                try:
+                    verts = mesh.vertex_positions_buffer().numpy().reshape(-1, 3)
+                    faces = mesh.faces_buffer().numpy().reshape(-1, 3)
+
+                    if len(verts) < 3 or len(faces) == 0:
+                        continue
+                    # 过滤地面
+                    if np.max(verts[:, 2]) < 0.5:
+                        continue
+
+                    # 取建筑物的 XY 占地范围（用所有顶点的 XY 坐标）
+                    xy = verts[:, :2]
+                    bx_min, by_min = xy.min(axis=0)
+                    bx_max, by_max = xy.max(axis=0)
+
+                    # 只处理场景范围内的建筑物
+                    if bx_max < xmin or bx_min > xmax or by_max < ymin or by_min > ymax:
+                        continue
+
+                    # 对每个三角面，标记其覆盖的网格格子为不可行走
+                    for face in faces:
+                        tri = verts[face, :2]  # [3, 2]
+                        # 三角形的包围盒
+                        tx_min, ty_min = tri.min(axis=0)
+                        tx_max, ty_max = tri.max(axis=0)
+
+                        # 转换为网格索引
+                        ix_min = max(0, int((tx_min - xmin) / grid_size))
+                        ix_max = min(W - 1, int((tx_max - xmin) / grid_size) + 1)
+                        iy_min = max(0, int((ty_min - ymin) / grid_size))
+                        iy_max = min(H - 1, int((ty_max - ymin) / grid_size) + 1)
+
+                        if ix_min > ix_max or iy_min > iy_max:
+                            continue
+
+                        # 用 matplotlib.path 做精确的点在三角形内判断
+                        tri_path = MplPath(np.vstack([tri, tri[0]]))  # 闭合路径
+
+                        # 生成候选格子的中心点
+                        gx = np.arange(ix_min, ix_max + 1)
+                        gy = np.arange(iy_min, iy_max + 1)
+                        gxx, gyy = np.meshgrid(gx, gy)
+                        cx = xmin + (gxx + 0.5) * grid_size
+                        cy = ymin + (gyy + 0.5) * grid_size
+                        pts = np.column_stack([cx.ravel(), cy.ravel()])
+
+                        inside = tri_path.contains_points(pts)
+                        inside_2d = inside.reshape(gyy.shape)
+
+                        walkable[iy_min:iy_max+1, ix_min:ix_max+1] &= ~inside_2d
+
+                    building_count += 1
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"  可行走网格计算失败：{e}，返回全可行走网格")
+
+        walkable_ratio = walkable.mean() * 100
+        print(f"  可行走网格：{W}×{H}，可行走比例：{walkable_ratio:.1f}%，"
+              f"处理了 {building_count} 个建筑物网格")
+
+        result = {
+            "grid": walkable,
+            "origin": origin,
+            "grid_size": grid_size,
+        }
+
+        # 保存缓存
+        if cache_path is not None:
+            try:
+                Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    cache_path,
+                    grid=walkable,
+                    origin=np.array(origin),
+                    grid_size=np.array(grid_size),
+                )
+                print(f"  可行走网格已缓存到：{cache_path}")
+            except Exception as e:
+                print(f"  缓存保存失败：{e}")
+
+        return result
+
     def compute_coverage_points(
         self,
         cell_size: float = 5.0,

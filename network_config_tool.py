@@ -163,16 +163,19 @@ def generate_preview_trajectories(
     num_per_speed: int = 3,
     speeds_kmh: List[float] = None,
     seed: int = 42,
+    walkable_grid: Optional[dict] = None,
 ) -> List[dict]:
     """
     预生成少量示例轨迹用于可视化
 
     参数：
-        bs_positions: [num_cells, 2] 基站位置
-        scene_bounds: 场景边界
+        bs_positions:  [num_cells, 2] 基站位置
+        scene_bounds:  场景边界
         num_per_speed: 每种速度生成的轨迹数
-        speeds_kmh: 速度列表
-        seed: 随机种子
+        speeds_kmh:    速度列表
+        seed:          随机种子
+        walkable_grid: 可选，来自 compute_walkable_grid()
+                       有 Sionna 时传入，中高速轨迹启用碰撞检测
 
     返回：
         轨迹列表
@@ -182,7 +185,7 @@ def generate_preview_trajectories(
 
     # 导入轨迹生成函数
     try:
-        from trajectory import generate_trajectory
+        from trajectory import generate_trajectory, _get_traj_types_for_speed
         from config import get_umi_config
         cfg = get_umi_config()
     except ImportError:
@@ -192,12 +195,24 @@ def generate_preview_trajectories(
     rng = np.random.default_rng(seed)
     trajectories = []
 
-    traj_types = ["munich_walk", "street_grid", "arc"]
-
     for speed_kmh in speeds_kmh:
         speed_ms = speed_kmh / 3.6
-        for i in range(num_per_speed):
-            traj_type = traj_types[i % len(traj_types)]
+        # 按速度选择轨迹类型（与实际仿真一致）
+        traj_types_for_speed = _get_traj_types_for_speed(speed_kmh)
+        # 取前 num_per_speed 种不重复的类型
+        seen = set()
+        preview_types = []
+        for t in traj_types_for_speed:
+            if t not in seen:
+                seen.add(t)
+                preview_types.append(t)
+            if len(preview_types) >= num_per_speed:
+                break
+
+        # 中高速（>30 km/h）使用碰撞检测
+        use_walkable = walkable_grid if speed_kmh > 30.0 else None
+
+        for traj_type in preview_types:
             try:
                 traj = generate_trajectory(
                     cfg=cfg,
@@ -206,6 +221,7 @@ def generate_preview_trajectories(
                     scene_bounds=scene_bounds,
                     bs_positions=bs_positions,
                     rng=rng,
+                    walkable_grid=use_walkable,
                 )
                 trajectories.append({
                     "pos": traj.pos,
@@ -617,30 +633,20 @@ def main():
             "relations": {str(k): v for k, v in neighbor_relations.items()},
         }
 
-    # ---- 预生成 UE 轨迹 ----
-    print(f"\n预生成示例轨迹（每种速度 {args.preview_trajs} 条）...")
-    trajectories = generate_preview_trajectories(
-        bs_positions=bs_positions,
-        scene_bounds=SCENE_BOUNDS,
-        num_per_speed=args.preview_trajs,
-        speeds_kmh=cfg.get("trajectory_config", {}).get("speeds_kmh", [30.0, 60.0, 120.0]),
-        seed=cfg.get("trajectory_config", {}).get("seed", 42),
-    )
-    print(f"  生成了 {len(trajectories)} 条示例轨迹")
-
     # ---- 保存配置 ----
     save_network_config(cfg)
 
     # ---- 可视化 ----
     print("\n生成可视化图...")
 
-    # 尝试加载 Sionna 场景（用于显示建筑物）
+    # 尝试加载 Sionna 场景（用于显示建筑物 + 碰撞检测）
     scene = None
+    walkable_grid = None
     try:
         import sionna
         import sionna.rt as srt
         from sionna.rt import load_scene, PlanarArray
-        print("  加载 Sionna 场景（用于显示建筑物）...")
+        print("  加载 Sionna 场景（用于显示建筑物 + 轨迹碰撞检测）...")
         scene = load_scene(getattr(srt.scene, "munich"))
         scene.tx_array = PlanarArray(num_rows=1, num_cols=1,
                                       vertical_spacing=0.5, horizontal_spacing=0.5,
@@ -649,8 +655,72 @@ def main():
                                       vertical_spacing=0.5, horizontal_spacing=0.5,
                                       pattern="iso", polarization="V")
         print("  场景加载完成")
+
+        # 计算可行走网格（用于中高速轨迹碰撞检测）
+        try:
+            from matplotlib.path import Path as MplPath
+            print("  计算可行走网格（用于轨迹碰撞检测）...")
+            xmin, xmax, ymin, ymax = SCENE_BOUNDS
+            grid_size = 2.0
+            W = int(np.ceil((xmax - xmin) / grid_size))
+            H = int(np.ceil((ymax - ymin) / grid_size))
+            walkable = np.ones((H, W), dtype=bool)
+
+            for mesh in scene.mi_scene.shapes():
+                try:
+                    verts = mesh.vertex_positions_buffer().numpy().reshape(-1, 3)
+                    faces = mesh.faces_buffer().numpy().reshape(-1, 3)
+                    if len(verts) < 3 or len(faces) == 0:
+                        continue
+                    if np.max(verts[:, 2]) < 0.5:
+                        continue
+                    for face in faces:
+                        tri = verts[face, :2]
+                        tx_min, ty_min = tri.min(axis=0)
+                        tx_max, ty_max = tri.max(axis=0)
+                        ix_min = max(0, int((tx_min - xmin) / grid_size))
+                        ix_max = min(W - 1, int((tx_max - xmin) / grid_size) + 1)
+                        iy_min = max(0, int((ty_min - ymin) / grid_size))
+                        iy_max = min(H - 1, int((ty_max - ymin) / grid_size) + 1)
+                        if ix_min > ix_max or iy_min > iy_max:
+                            continue
+                        tri_path = MplPath(np.vstack([tri, tri[0]]))
+                        gx = np.arange(ix_min, ix_max + 1)
+                        gy = np.arange(iy_min, iy_max + 1)
+                        gxx, gyy = np.meshgrid(gx, gy)
+                        cx = xmin + (gxx + 0.5) * grid_size
+                        cy = ymin + (gyy + 0.5) * grid_size
+                        pts = np.column_stack([cx.ravel(), cy.ravel()])
+                        inside = tri_path.contains_points(pts).reshape(gyy.shape)
+                        walkable[iy_min:iy_max+1, ix_min:ix_max+1] &= ~inside
+                except Exception:
+                    pass
+
+            walkable_grid = {
+                "grid": walkable,
+                "origin": (xmin, ymin),
+                "grid_size": grid_size,
+            }
+            print(f"  可行走网格计算完成（可行走比例：{walkable.mean()*100:.1f}%）")
+        except Exception as e:
+            print(f"  可行走网格计算失败（{e}），轨迹不使用碰撞检测")
+            walkable_grid = None
+
     except Exception as e:
         print(f"  场景加载失败（{e}），不显示建筑物背景")
+
+    # ---- 预生成 UE 轨迹（有 Sionna 时使用碰撞检测）----
+    print(f"\n预生成示例轨迹（每种速度 {args.preview_trajs} 条）...")
+    trajectories = generate_preview_trajectories(
+        bs_positions=bs_positions,
+        scene_bounds=SCENE_BOUNDS,
+        num_per_speed=args.preview_trajs,
+        speeds_kmh=cfg.get("trajectory_config", {}).get("speeds_kmh", [30.0, 60.0, 120.0]),
+        seed=cfg.get("trajectory_config", {}).get("seed", 42),
+        walkable_grid=walkable_grid,
+    )
+    print(f"  生成了 {len(trajectories)} 条示例轨迹"
+          + ("（中高速使用碰撞检测）" if walkable_grid is not None else ""))
 
     save_path = None
     if args.save:

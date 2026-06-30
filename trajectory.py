@@ -95,6 +95,68 @@ MUNICH_BLOCK_LENGTH_M = 80.0  # 典型街区长度
 # 轨迹生成函数
 # =========================================================
 
+def _is_walkable(pos: np.ndarray, walkable_grid: Optional[dict]) -> bool:
+    """
+    检查位置是否可行走（不在建筑物内）
+
+    参数：
+        pos:           [2] UE 2D 坐标 [x, y]
+        walkable_grid: compute_walkable_grid() 的返回值，None 则跳过检查
+
+    返回：
+        True = 可行走（街道），False = 不可行走（建筑物内）
+    """
+    if walkable_grid is None:
+        return True
+    grid = walkable_grid["grid"]
+    xmin, ymin = walkable_grid["origin"]
+    gs = walkable_grid["grid_size"]
+    ix = int((pos[0] - xmin) / gs)
+    iy = int((pos[1] - ymin) / gs)
+    H, W = grid.shape
+    if 0 <= ix < W and 0 <= iy < H:
+        return bool(grid[iy, ix])
+    return True  # 边界外默认可行走
+
+
+def _find_walkable_direction(
+    pos: np.ndarray,
+    speed_ms: float,
+    dt: float,
+    current_direction: float,
+    street_dirs_rad: List[float],
+    walkable_grid: Optional[dict],
+    rng: np.random.Generator,
+) -> float:
+    """
+    当当前方向被建筑物阻挡时，找到一个可行走的街道方向
+
+    策略：
+    1. 优先尝试左转/右转 90°
+    2. 其次尝试 U 形转弯
+    3. 最后随机选择一个街道方向
+    """
+    # 候选方向：左转、右转、U 形、随机街道方向
+    candidates = [
+        (current_direction + math.pi / 2) % (2 * math.pi),   # 左转
+        (current_direction - math.pi / 2) % (2 * math.pi),   # 右转
+        (current_direction + math.pi) % (2 * math.pi),        # U 形
+    ]
+    # 加入所有街道方向
+    candidates.extend(street_dirs_rad)
+
+    for direction in candidates:
+        test_pos = pos + np.array([
+            speed_ms * math.cos(direction),
+            speed_ms * math.sin(direction),
+        ]) * dt
+        if _is_walkable(test_pos, walkable_grid):
+            return direction
+
+    # 所有方向都被阻挡（极少发生），随机选一个
+    return float(rng.choice(street_dirs_rad))
+
+
 def generate_trajectory(
     cfg: SimConfig,
     speed_ms: float,
@@ -102,6 +164,7 @@ def generate_trajectory(
     scene_bounds: Tuple[float, float, float, float],
     bs_positions: np.ndarray,
     rng: Optional[np.random.Generator] = None,
+    walkable_grid: Optional[dict] = None,
 ) -> Trajectory:
     """
     生成单条 UE 轨迹
@@ -129,6 +192,11 @@ def generate_trajectory(
                          街道间距约 80m，转弯概率更高
         'stop_and_go'  - 停留-移动交替（模拟等红灯）
                          在小区边界附近停留，测试 A3 的乒乓切换
+
+    walkable_grid 参数（可选）：
+        来自 scene_mgr.compute_walkable_grid()，用于碰撞检测。
+        提供后，中高速轨迹（street_grid/munich_walk/arc/linear）
+        会避免进入建筑物内部。
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -166,18 +234,22 @@ def generate_trajectory(
 
     # 根据轨迹类型生成轨迹
     if traj_type == "linear":
-        pos, vel = _generate_linear(x0, y0, speed_ms, num_slots, cfg.slot_duration, rng)
+        pos, vel = _generate_linear(x0, y0, speed_ms, num_slots, cfg.slot_duration, rng,
+                                    walkable_grid=walkable_grid)
     elif traj_type == "random":
         pos, vel = _generate_random(x0, y0, speed_ms, num_slots, cfg.slot_duration, rng)
     elif traj_type == "arc":
-        pos, vel = _generate_arc(x0, y0, speed_ms, num_slots, cfg.slot_duration, rng)
+        pos, vel = _generate_arc(x0, y0, speed_ms, num_slots, cfg.slot_duration, rng,
+                                  walkable_grid=walkable_grid)
     elif traj_type == "street_grid":
         pos, vel = _generate_street_grid(
-            x0, y0, speed_ms, num_slots, cfg.slot_duration, scene_bounds, rng
+            x0, y0, speed_ms, num_slots, cfg.slot_duration, scene_bounds, rng,
+            walkable_grid=walkable_grid,
         )
     elif traj_type == "munich_walk":
         pos, vel = _generate_munich_walk(
-            x0, y0, speed_ms, num_slots, cfg.slot_duration, scene_bounds, rng
+            x0, y0, speed_ms, num_slots, cfg.slot_duration, scene_bounds, rng,
+            walkable_grid=walkable_grid,
         )
     elif traj_type == "stop_and_go":
         pos, vel = _generate_stop_and_go(
@@ -207,17 +279,33 @@ def _generate_linear(
     x0: float, y0: float,
     speed_ms: float, num_slots: int, dt: float,
     rng: np.random.Generator,
+    walkable_grid: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """直线匀速轨迹"""
-    direction = float(rng.random()) * 2 * math.pi
-    vx = speed_ms * math.cos(direction)
-    vy = speed_ms * math.sin(direction)
+    """直线匀速轨迹（支持碰撞检测：遇到建筑物时转向）"""
+    street_dirs_rad = [math.radians(d) for d in [0.0, 90.0, 180.0, 270.0]]
+    direction = float(rng.choice(street_dirs_rad))
 
     pos = np.zeros((num_slots, 2))
     vel = np.zeros((num_slots, 2))
 
-    for t in range(num_slots):
-        pos[t] = [x0 + vx * t * dt, y0 + vy * t * dt]
+    pos[0] = [x0, y0]
+    vel[0] = [speed_ms * math.cos(direction), speed_ms * math.sin(direction)]
+
+    for t in range(1, num_slots):
+        vx = speed_ms * math.cos(direction)
+        vy = speed_ms * math.sin(direction)
+        new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
+        # 碰撞检测：遇到建筑物时转向
+        if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
+            direction = _find_walkable_direction(
+                pos[t - 1], speed_ms, dt, direction, street_dirs_rad, walkable_grid, rng
+            )
+            vx = speed_ms * math.cos(direction)
+            vy = speed_ms * math.sin(direction)
+            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
+        pos[t] = new_pos
         vel[t] = [vx, vy]
 
     return pos, vel
@@ -252,9 +340,11 @@ def _generate_arc(
     x0: float, y0: float,
     speed_ms: float, num_slots: int, dt: float,
     rng: np.random.Generator,
+    walkable_grid: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """圆弧轨迹（直线 → 圆弧转弯 → 直线）"""
-    direction = float(rng.random()) * 2 * math.pi
+    """圆弧轨迹（直线 → 圆弧转弯 → 直线，支持碰撞检测）"""
+    street_dirs_rad = [math.radians(d) for d in [0.0, 90.0, 180.0, 270.0]]
+    direction = float(rng.choice(street_dirs_rad))
     turn_start = round(num_slots * 0.3)
     turn_end = round(num_slots * 0.7)
     turn_angle = math.pi / 2 * (2 * float(rng.random()) - 1)
@@ -271,7 +361,18 @@ def _generate_arc(
             direction += turn_rate * dt
         vx = speed_ms * math.cos(direction)
         vy = speed_ms * math.sin(direction)
-        pos[t] = pos[t - 1] + np.array([vx, vy]) * dt
+        new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
+        # 碰撞检测
+        if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
+            direction = _find_walkable_direction(
+                pos[t - 1], speed_ms, dt, direction, street_dirs_rad, walkable_grid, rng
+            )
+            vx = speed_ms * math.cos(direction)
+            vy = speed_ms * math.sin(direction)
+            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
+        pos[t] = new_pos
         vel[t] = [vx, vy]
 
     return pos, vel
@@ -282,6 +383,7 @@ def _generate_street_grid(
     speed_ms: float, num_slots: int, dt: float,
     scene_bounds: Tuple[float, float, float, float],
     rng: np.random.Generator,
+    walkable_grid: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     道路网格轨迹（推荐用于慕尼黑场景）
@@ -332,6 +434,17 @@ def _generate_street_grid(
             vy = speed_ms * math.sin(direction)
             new_pos = pos[t - 1] + np.array([vx, vy]) * dt
 
+        # 碰撞检测：遇到建筑物时转向
+        if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
+            direction = _find_walkable_direction(
+                pos[t - 1], speed_ms, dt, direction,
+                [0.0, math.pi / 2, math.pi, 3 * math.pi / 2],
+                walkable_grid, rng,
+            )
+            vx = speed_ms * math.cos(direction)
+            vy = speed_ms * math.sin(direction)
+            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
         pos[t] = new_pos
         vel[t] = [vx, vy]
 
@@ -358,6 +471,7 @@ def _generate_munich_walk(
     speed_ms: float, num_slots: int, dt: float,
     scene_bounds: Tuple[float, float, float, float],
     rng: np.random.Generator,
+    walkable_grid: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     慕尼黑街道行走轨迹（新增，专为慕尼黑场景设计）
@@ -427,6 +541,16 @@ def _generate_munich_walk(
                 direction = math.pi / 2  # 向北
             else:
                 direction = 3 * math.pi / 2  # 向南
+            vx = speed_ms * math.cos(direction)
+            vy = speed_ms * math.sin(direction)
+            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+
+        # 碰撞检测：遇到建筑物时立即转向
+        if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
+            direction = _find_walkable_direction(
+                pos[t - 1], speed_ms, dt, direction, street_dirs_rad, walkable_grid, rng
+            )
+            in_turn = False  # 取消当前转弯过渡
             vx = speed_ms * math.cos(direction)
             vy = speed_ms * math.sin(direction)
             new_pos = pos[t - 1] + np.array([vx, vy]) * dt
@@ -604,6 +728,7 @@ def generate_all_trajectories(
     scene_bounds: Tuple[float, float, float, float],
     seed: int = 42,
     coverage_points: Optional[np.ndarray] = None,
+    walkable_grid: Optional[dict] = None,
 ) -> List[Trajectory]:
     """
     生成所有轨迹
@@ -616,14 +741,16 @@ def generate_all_trajectories(
         coverage_points: [N, 2] 可选，覆盖图中的可行走点坐标
                          如果提供，轨迹起点从这些点中选择（更均匀的分布）
                          如果为 None，从基站附近的街道交叉口选择
+        walkable_grid:   可选，来自 scene_mgr.compute_walkable_grid()
+                         提供后，中高速轨迹会避免进入建筑物内部
 
     返回：
         trajectories: 所有轨迹的列表
 
     轨迹分配策略（速度分级，物理上更合理）：
         低速（≤30 km/h）：行人/自行车，频繁转弯，可以停留
-        中速（≤60 km/h）：城市车辆，路口转弯，偶尔停留
-        高速（>60 km/h）：快速路/高速，少转弯，主要直线和大弧度
+        中速（≤60 km/h）：城市车辆，路口转弯，偶尔停留（使用碰撞检测）
+        高速（>60 km/h）：快速路/高速，少转弯（使用碰撞检测）
     """
     rng = np.random.default_rng(seed)
 
@@ -637,12 +764,17 @@ def generate_all_trajectories(
           f"Y=[{scene_bounds[2]:.0f}, {scene_bounds[3]:.0f}]m")
     if coverage_points is not None:
         print(f"使用覆盖图起点：{len(coverage_points)} 个可行走点")
+    if walkable_grid is not None:
+        print(f"使用可行走网格：中高速轨迹启用碰撞检测")
 
     for s_idx, speed_ms in enumerate(cfg.speeds_ms):
         speed_kmh = cfg.speeds_kmh[s_idx]
         traj_types = _get_traj_types_for_speed(speed_kmh)
         print(f"\n速度：{speed_kmh:.0f} km/h ({speed_ms:.2f} m/s) "
               f"→ 轨迹类型：{set(traj_types)}")
+
+        # 中高速（>30 km/h）使用碰撞检测，低速不使用（行人可以进入建筑物附近）
+        use_walkable = walkable_grid if speed_kmh > 30.0 else None
 
         for t_idx in range(traj_per_speed):
             traj_type = traj_types[t_idx % len(traj_types)]
@@ -661,6 +793,7 @@ def generate_all_trajectories(
                 scene_bounds=scene_bounds,
                 bs_positions=effective_bs_positions,
                 rng=rng,
+                walkable_grid=use_walkable,
             )
 
             trajectories.append(traj)

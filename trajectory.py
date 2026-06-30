@@ -631,7 +631,8 @@ if __name__ == "__main__":
 
     cfg = DEFAULT_CONFIG
     bs_positions = compute_hexagonal_bs_positions(cfg.num_cells, cfg.isd)
-    scene_bounds = (-cfg.isd * 2.5, cfg.isd * 2.5, -cfg.isd * 2.5, cfg.isd * 2.5)
+    # 使用固定的慕尼黑场景边界 ±500m，与 scene_setup.py 保持一致
+    scene_bounds = (-500.0, 500.0, -500.0, 500.0)
 
     print("测试轨迹生成（慕尼黑场景）...")
 

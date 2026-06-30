@@ -223,17 +223,18 @@ def _extract_path_data_sionna201(paths):
     从 Sionna 2.0.1 paths 对象提取路径数据
 
     Sionna 2.0.1 中 Paths 对象的属性（基于源码 paths.py）：
-        paths.a:     (a_real, a_imag) 元组，每个形状为
-                     [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
-                     或 [num_rx, num_tx, num_paths]（synthetic_array=True 时）
-        paths.tau:   路径时延 [s]，形状同上
-        paths.phi_r: 到达方位角 [rad]，形状同上
-        paths.theta_r: 到达仰角 [rad]，形状同上
-        paths.doppler: Doppler 频移 [Hz]，形状同上
+        paths.a:            (a_real, a_imag) 元组，[num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+        paths.tau:          路径时延 [s]，形状同上
+        paths.phi_r:        到达方位角 [rad]，形状同上
+        paths.theta_r:      到达仰角 [rad]，形状同上
+        paths.doppler:      Doppler 频移 [Hz]，形状同上（物理精确，包含所有散射体贡献）
+        paths.interactions: 路径交互类型，[max_depth, num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
+                            InteractionType.LOS=0, SPECULAR=1, DIFFRACTION=2, ...
 
     注意：
     - paths.a 是 (a_real, a_imag) 元组，不是复数张量
-    - 需要用 .numpy() 转换为 numpy 数组
+    - paths.doppler 已经包含了完整的 Doppler 计算（发射机+接收机+散射体速度贡献）
+    - paths.interactions 可以直接判断 LOS/NLOS，比时延误差判断更准确
     """
     try:
         # paths.a 是 (a_real, a_imag) 元组
@@ -247,13 +248,19 @@ def _extract_path_data_sionna201(paths):
         phi_r = paths.phi_r.numpy()
         theta_r = paths.theta_r.numpy()
 
-        # 路径类型（可选）
+        # Doppler 频移（物理精确，直接从 paths 读取）
         try:
-            path_types = paths.interactions.numpy()
+            doppler = paths.doppler.numpy()
         except AttributeError:
-            path_types = None
+            doppler = None
 
-        return a, tau, phi_r, theta_r, path_types
+        # 路径交互类型（用于精确判断 LOS/NLOS）
+        try:
+            interactions = paths.interactions.numpy()
+        except AttributeError:
+            interactions = None
+
+        return a, tau, phi_r, theta_r, doppler, interactions
 
     except Exception as e:
         raise RuntimeError(f"路径数据提取失败：{e}")

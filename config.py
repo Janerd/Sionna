@@ -251,15 +251,20 @@ class SimConfig:
     @property
     def num_features(self) -> int:
         """特征向量维度
-        
-        特征组成（每个小区 C 个）：
-          RSRP(C) + RSRQ(C) + SINR(C) + Doppler_est(C) + BeamID(C)
-          + RSRP_diff(C) + BeamID_diff(C) + DelaySpread(C) + LOS_indicator(C)
-        共 9*C 维
-        
-        注意：去掉了 Ground Truth 速度和方向角
+
+        特征组成（每个小区 C 个，共 10 类）：
+          RSRP_l3(C) + RSRQ(C) + SINR(C) + Doppler_est(C) + BeamID(C)
+          + RSRP_diff(C) + BeamID_diff(C) + DelaySpread(C)
+          + K_factor(C) + min_tau(C)
+        共 10*C 维
+
+        变更说明：
+          - 删除 LOS_indicator（0/1 二值，信息量有限）
+          - 新增 K_factor（Ricean K 因子，连续值，比 LOS_indicator 更精细）
+          - 新增 min_tau（主径时延，隐含 UE 到基站距离）
+          - 所有特征均可在现实网络中提取（不依赖仿真内部信息）
         """
-        return 9 * self.num_cells
+        return 10 * self.num_cells
 
     @property
     def a3_ttt_slots(self) -> int:

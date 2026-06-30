@@ -476,14 +476,16 @@ def simulate_trajectory_channel(
     """
     对一条完整轨迹执行信道仿真，提取所有时隙的特征
 
+    优化：
+      - 方案 B：复用 PathSolver 实例（在 SceneManager.setup() 中创建）
+      - 方案 A：批量化 UE 位置（每批 cfg.rt_batch_size 个时隙，一次 PathSolver 调用）
+
     参数：
         traj:               Trajectory 对象（来自 trajectory.py）
         scene_mgr:          SceneManager 对象（来自 scene_setup.py，Sionna 2.x 版本）
         cfg:                仿真配置
         logger:             logging.Logger 对象（可选，用于记录错误到日志文件）
         neighbor_relations: 邻区关系字典（来自 network_config.json）
-                            如果提供，只对服务小区 + 邻区做射线追踪（加速约 3 倍）
-                            如果为 None，对所有基站做射线追踪
 
     返回：
         result 字典，包含所有时隙的信道数据和特征矩阵
@@ -504,9 +506,10 @@ def simulate_trajectory_channel(
 
     T = traj.num_slots
     C = cfg.num_cells
+    batch_size = getattr(cfg, "rt_batch_size", 32)  # 默认 32，兼容旧配置
 
     # 预分配存储空间
-    rsrp_raw_seq = np.full((T, C), -120.0, dtype=np.float32)   # 初始化为 -120 dBm（无信号）
+    rsrp_raw_seq = np.full((T, C), -120.0, dtype=np.float32)
     rsrq_seq = np.full((T, C), -20.0, dtype=np.float32)
     sinr_seq = np.full((T, C), -20.0, dtype=np.float32)
     doppler_seq = np.zeros((T, C), dtype=np.float32)
@@ -519,105 +522,112 @@ def simulate_trajectory_channel(
     prev_beam_id = None
 
     # ---- 邻区优化：确定初始服务小区 ----
-    # 用距离最近的基站作为第一个时隙的服务小区
     bs_positions_2d = scene_mgr.bs_positions_2d  # [C, 2]
     if neighbor_relations is not None:
         init_dists = np.linalg.norm(bs_positions_2d - traj.pos[0], axis=1)
         current_serving_cell = int(np.argmin(init_dists))
-        _log(f"  邻区优化已启用，初始服务小区：BS{current_serving_cell}，"
-             f"每时隙约 {1 + len(neighbor_relations.get(current_serving_cell, []))} 个基站做射线追踪"
-             f"（全量：{C} 个）", "debug")
     else:
-        current_serving_cell = 0  # 无邻区配置时不使用优化
+        current_serving_cell = 0
 
-    # 逐时隙仿真
-    for t in range(T):
-        ue_pos_2d = traj.pos[t]
-        ue_vel_2d = traj.vel[t]
-        ue_pos_3d = np.array([ue_pos_2d[0], ue_pos_2d[1], cfg.h_ue], dtype=np.float32)
+    # ---- 方案 A：批量化处理 ----
+    # 将 T 个时隙分成若干批，每批同时放置 batch_size 个 UE，一次 PathSolver 调用
+    for batch_start in range(0, T, batch_size):
+        batch_end = min(batch_start + batch_size, T)
+        batch_indices = list(range(batch_start, batch_end))
+        N = len(batch_indices)  # 本批实际 UE 数量
 
-        # ---- 确定本时隙需要做射线追踪的基站列表 ----
-        if neighbor_relations is not None:
-            active_cells = get_active_cells(
-                ue_pos_2d=ue_pos_2d,
-                bs_positions_2d=bs_positions_2d,
-                neighbor_relations=neighbor_relations,
-                serving_cell=current_serving_cell,
-            )
-            # 非活跃基站：保持上一时隙的 RSRP（或初始值 -120 dBm）
-            # 这样特征矩阵里所有基站都有值，不影响数据集格式
-        else:
-            active_cells = list(range(C))  # 无邻区配置：对所有基站做射线追踪
+        # 本批的 UE 位置
+        batch_pos_2d = traj.pos[batch_indices]   # [N, 2]
+        batch_vel_2d = traj.vel[batch_indices]   # [N, 2]
 
-        # ---- 临时：只激活 active_cells 对应的发射机 ----
-        # 通过在场景中只保留 active_cells 的发射机来实现
-        # 注意：Sionna 的 PathSolver 会对所有发射机计算路径
-        # 所以我们需要临时移除非活跃基站，计算完再恢复
-        # 为了简化实现，这里采用"计算全量但只更新 active_cells"的方式
-        # 真正的加速需要修改 SceneManager 来支持部分发射机激活
-        # TODO: 实现真正的部分发射机激活（需要修改 SceneManager）
+        # 批量放置 UE
+        scene_mgr.place_receivers_batch(batch_pos_2d)
 
-        # 在场景中放置 UE
-        scene_mgr.place_receiver(ue_pos_2d)
-
-        # 执行射线追踪（Sionna 2.x API）
+        # 一次 PathSolver 调用，计算所有 N 个 UE 的路径
         try:
             paths = scene_mgr.trace_paths()
-            # Sionna 2.0.1: extract_path_data 返回 (a, tau, phi_r, theta_r, path_types)
             path_data = scene_mgr.extract_path_data(paths)
             if len(path_data) == 5:
-                a, tau, phi_r, theta_r, path_types = path_data
+                a_batch, tau_batch, phi_r_batch, theta_r_batch, path_types_batch = path_data
             else:
-                a, tau, phi_r, path_types = path_data
-                theta_r = None
+                a_batch, tau_batch, phi_r_batch, path_types_batch = path_data
+                theta_r_batch = None
 
-            # 计算信道测量量和 CSI 特征
-            meas, rsrp_diff, beam_id_diff = compute_channel_from_paths(
-                a=a,
-                tau=tau,
-                phi_r=phi_r,
-                path_types=path_types,
-                cfg=cfg,
-                ue_vel=ue_vel_2d,
-                bs_positions_3d=scene_mgr.bs_positions_3d,
-                ue_pos_3d=ue_pos_3d,
-                prev_rsrp_raw=prev_rsrp_raw,
-                prev_beam_id=prev_beam_id,
-                theta_r=theta_r,
-            )
+            batch_ok = True
         except Exception as e:
-            # 射线追踪失败时使用默认值，并记录完整错误信息
             tb_str = _traceback.format_exc()
-            if t == 0:
-                # 第一个时隙失败时记录完整错误（包含 traceback 和 Scene API 信息）
-                _log(f"[轨迹 {traj.traj_type}] 时隙 {t} 射线追踪失败：{e}", "error")
+            _log(f"[轨迹 {traj.traj_type}] 批次 {batch_start}~{batch_end-1} 射线追踪失败：{e}", "error")
+            if batch_start == 0:
                 _log(f"完整错误信息：\n{tb_str}", "error")
-                # 记录 Scene 对象的可用方法（帮助诊断 API 不兼容问题）
                 try:
                     scene_methods = [m for m in dir(scene_mgr.scene) if not m.startswith("_")]
                     _log(f"Scene 对象可用方法：{scene_methods}", "error")
                 except Exception:
                     pass
-            meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
+            batch_ok = False
 
-        # 存储结果
-        rsrp_raw_seq[t] = meas.rsrp_raw
-        rsrq_seq[t] = meas.rsrq
-        sinr_seq[t] = meas.sinr
-        doppler_seq[t] = meas.doppler_est
-        beam_id_seq[t] = meas.beam_id
-        delay_spread_seq[t] = meas.delay_spread_ns
-        los_seq[t] = meas.los_indicator
-        serving_raw_seq[t] = meas.serving_cell
+        # 处理本批每个时隙
+        for i, t in enumerate(batch_indices):
+            ue_pos_2d = batch_pos_2d[i]
+            ue_vel_2d = batch_vel_2d[i]
+            ue_pos_3d = np.array([ue_pos_2d[0], ue_pos_2d[1], cfg.h_ue], dtype=np.float32)
 
-        prev_rsrp_raw = meas.rsrp_raw.copy()
-        prev_beam_id = meas.beam_id.copy()
+            if batch_ok:
+                try:
+                    # 提取第 i 个 UE 的路径数据
+                    # a_batch 形状：[N, 1, C, 1, num_paths] 或 [N, C, num_paths]
+                    if a_batch.ndim == 5:
+                        a_i = a_batch[i:i+1]       # [1, 1, C, 1, num_paths]
+                    elif a_batch.ndim == 3:
+                        a_i = a_batch[i:i+1]       # [1, C, num_paths]
+                    else:
+                        a_i = a_batch[i:i+1]
 
-        # ---- 更新服务小区（供下一时隙使用）----
-        # 用本时隙的瞬时 RSRP 最强基站作为下一时隙的服务小区
-        # 注意：这只是内部变量，用于决定射线追踪范围，不影响数据集标签
-        if neighbor_relations is not None:
-            current_serving_cell = int(np.argmax(meas.rsrp_raw))
+                    tau_i = tau_batch[i:i+1]       # [1, C, num_paths]
+                    phi_r_i = phi_r_batch[i:i+1]   # [1, C, num_paths]
+                    theta_r_i = theta_r_batch[i:i+1] if theta_r_batch is not None else None
+                    path_types_i = None  # 批量模式下暂不提取路径类型
+
+                    meas, rsrp_diff, beam_id_diff = compute_channel_from_paths(
+                        a=a_i,
+                        tau=tau_i,
+                        phi_r=phi_r_i,
+                        path_types=path_types_i,
+                        cfg=cfg,
+                        ue_vel=ue_vel_2d,
+                        bs_positions_3d=scene_mgr.bs_positions_3d,
+                        ue_pos_3d=ue_pos_3d,
+                        prev_rsrp_raw=prev_rsrp_raw,
+                        prev_beam_id=prev_beam_id,
+                        theta_r=theta_r_i,
+                    )
+                except Exception as e:
+                    meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
+            else:
+                meas, rsrp_diff, beam_id_diff = _default_measurement(cfg)
+
+            # 存储结果
+            rsrp_raw_seq[t] = meas.rsrp_raw
+            rsrq_seq[t] = meas.rsrq
+            sinr_seq[t] = meas.sinr
+            doppler_seq[t] = meas.doppler_est
+            beam_id_seq[t] = meas.beam_id
+            delay_spread_seq[t] = meas.delay_spread_ns
+            los_seq[t] = meas.los_indicator
+            serving_raw_seq[t] = meas.serving_cell
+
+            prev_rsrp_raw = meas.rsrp_raw.copy()
+            prev_beam_id = meas.beam_id.copy()
+
+            # 更新服务小区（供下一时隙使用）
+            if neighbor_relations is not None:
+                current_serving_cell = int(np.argmax(meas.rsrp_raw))
+
+        # 批次处理完后释放 GPU 内存
+        try:
+            del paths
+        except Exception:
+            pass
 
     # ---- L3 滤波 ----
     rsrp_l3_seq = apply_l3_filter(rsrp_raw_seq, cfg.l3_alpha)

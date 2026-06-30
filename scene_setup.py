@@ -188,7 +188,7 @@ def get_bs_positions(cfg: SimConfig) -> np.ndarray:
 # Sionna 2.0.1 射线追踪辅助函数
 # =========================================================
 
-def _get_paths_sionna201(scene, cfg: SimConfig):
+def _get_paths_sionna201(scene, cfg: SimConfig, solver=None):
     """
     Sionna 2.0.1 射线追踪 API
 
@@ -200,8 +200,10 @@ def _get_paths_sionna201(scene, cfg: SimConfig):
     - PathSolver 是独立的类，不是 scene 的方法
     - scene.tx_array 和 scene.rx_array 必须在调用前设置
     - scene.all_set(radio_map=False) 会检查是否设置了 tx_array/rx_array
+    - solver 参数：传入已有实例可复用（方案 B 优化），None 则新建
     """
-    solver = PathSolver()
+    if solver is None:
+        solver = PathSolver()
     paths = solver(
         scene,
         max_depth=cfg.max_reflections + cfg.max_diffractions,
@@ -399,7 +401,7 @@ class SceneManager:
 
     def place_receiver(self, ue_pos_2d: np.ndarray) -> None:
         """
-        在场景中放置 UE（接收机）
+        在场景中放置单个 UE（接收机）
 
         参数：
             ue_pos_2d: UE 的 2D 坐标 [x, y]，单位 m
@@ -417,13 +419,42 @@ class SceneManager:
         )
         self.scene.add(rx)
 
+    def place_receivers_batch(self, ue_positions_2d: np.ndarray) -> None:
+        """
+        在场景中批量放置多个 UE（方案 A 优化）
+
+        参数：
+            ue_positions_2d: [N, 2] UE 的 2D 坐标数组，单位 m
+
+        注意：
+            - 批量放置后调用 trace_paths() 会一次计算所有 UE 的路径
+            - 路径数据形状：a[N, 1, C, 1, num_paths]，tau[N, C, num_paths]
+            - 处理完后调用 clear_receivers() 清理
+        """
+        # 清除所有现有接收机
+        for rx_name in list(self.scene.receivers.keys()):
+            self.scene.remove(rx_name)
+
+        # 批量添加接收机
+        for i, pos_2d in enumerate(ue_positions_2d):
+            ue_pos_3d = [float(pos_2d[0]), float(pos_2d[1]), self.cfg.h_ue]
+            rx = Receiver(
+                name=f"ue_{i}",
+                position=ue_pos_3d,
+                orientation=[0.0, 0.0, 0.0],
+            )
+            self.scene.add(rx)
+
+    def clear_receivers(self) -> None:
+        """清除场景中所有接收机（批量处理后调用）"""
+        for rx_name in list(self.scene.receivers.keys()):
+            self.scene.remove(rx_name)
+
     def trace_paths(self):
         """
-        执行射线追踪（Sionna 2.0.1 API）
+        执行射线追踪（Sionna 2.0.1 API，方案 B：复用 PathSolver 实例）
 
-        Sionna 2.0.1 正确用法：
-            solver = PathSolver()
-            paths = solver(scene, max_depth=..., samples_per_src=..., ...)
+        使用 self._path_solver 复用实例，避免每次重新初始化的开销。
 
         返回：
             paths: Sionna 2.0.1 Paths 对象
@@ -431,7 +462,8 @@ class SceneManager:
         if not self._is_setup:
             raise RuntimeError("请先调用 setup() 初始化场景")
 
-        return _get_paths_sionna201(self.scene, self.cfg)
+        # 方案 B：复用 PathSolver 实例（self._path_solver 在 setup() 中创建）
+        return _get_paths_sionna201(self.scene, self.cfg, solver=self._path_solver)
 
     def extract_path_data(self, paths):
         """

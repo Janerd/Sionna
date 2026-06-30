@@ -1,7 +1,7 @@
 ============================================================
 Sionna RT Dataset Info (Sionna 2.x)
 ============================================================
-Generation time: 60404.8 s (1006.7 min)
+Generation time: 17006.6 s (283.4 min)
 
 Scene config:
   scenario_type: umi
@@ -16,18 +16,18 @@ Dataset size:
   train:         153576
   val:           51192
   test:          51192
-  feature_dim:   63 (= 9 x 7 cells)
+  feature_dim:   70 (= 9 x 7 cells)
   window_size:   10 slots (400 ms)
   pred_horizon:  5 slots (200 ms)
 
 Label distribution (test set):
-  cell_0: 18996 samples (37.1%)
-  cell_1: 5479 samples (10.7%)
-  cell_2: 3423 samples (6.7%)
-  cell_3: 3878 samples (7.6%)
-  cell_4: 3939 samples (7.7%)
-  cell_5: 8918 samples (17.4%)
-  cell_6: 6559 samples (12.8%)
+  cell_0: 19188 samples (37.5%)
+  cell_1: 8054 samples (15.7%)
+  cell_2: 2188 samples (4.3%)
+  cell_3: 10417 samples (20.3%)
+  cell_4: 4151 samples (8.1%)
+  cell_5: 3985 samples (7.8%)
+  cell_6: 3209 samples (6.3%)
 
 Feature layout (9 x C dims):
   [0:C]    RSRP_l3         - L3 filtered RSRP [dBm]

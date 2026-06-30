@@ -1,17 +1,31 @@
-jitc_llvm_init(): LLVM API initialization failed ..
-[polyscope] Backend: openGL3_glfw -- Loaded openGL version: 3.3.0 NVIDIA 591.86
-[!] Exception thrown in app.tick(): [parser.cpp:1718] At dictionary node "emitter": failed to instantiate emitter plugin of type "envmap": [FileStream] "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\envmaps\teufelsberg_ground_2_1k.exr": I/O error while attempting to open file: No such file or directory
-Traceback (most recent call last):
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\reload.py", line 142, in tick
-    self.app.tick()
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\gui.py", line 464, in tick
-    new_img, aovs, self.render_cache = render_scene(
-                                       ^^^^^^^^^^^^^
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\rendering.py", line 247, in render_scene
-    cache = setup_scene_for_rendering(cfg, scene, use_denoiser=use_denoiser)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\scripts\..\src\sionna_rt_gui\rendering.py", line 75, in setup_scene_for_rendering
-    visual_scene = mi.load_dict(visual_scene_dict)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: [parser.cpp:1718] At dictionary node "emitter": failed to instantiate emitter plugin of type "envmap": [FileStream] "C:\PC_Simu\Sionna\sourceCode\sionna-rt-gui\src\sionna_rt_gui\data\envmaps\teufelsberg_ground_2_1k.exr": I/O error while attempting to open file: No such file or directory
-
+2026-06-30 15:54:15 [INFO] 日志文件：C:\PC_Simu\Sionna\generate_dataset.log
+2026-06-30 15:54:15 [INFO] ============================================================
+2026-06-30 15:54:15 [INFO] Sionna RT 数据集生成（Sionna 2.x）
+2026-06-30 15:54:15 [INFO] ============================================================
+2026-06-30 15:54:15 [INFO] 场景：umi，7 小区，ISD=306.8m
+2026-06-30 15:54:15 [INFO] 轨迹数：120，速度：[30.0, 60.0, 120.0] km/h
+2026-06-30 15:54:15 [INFO] 特征维度：70（= 9 × 7）
+2026-06-30 15:54:15 [INFO] 标签：未来 5 slots 后的最优 SINR 小区
+2026-06-30 15:54:15 [INFO] 输出目录：C:\PC_Simu\Sionna\outputs
+2026-06-30 15:54:15 [INFO] GPU：是
+2026-06-30 15:54:15 [INFO] 随机种子：42
+2026-06-30 15:54:15 [INFO] 
+2026-06-30 15:54:15 [INFO] 步骤 1/4：初始化 Sionna RT 场景...
+2026-06-30 15:54:17 [INFO] 
+2026-06-30 15:54:17 [INFO] 步骤 1.5/4：计算覆盖图和可行走网格（约 2~10 分钟）...
+2026-06-30 15:54:17 [INFO] 覆盖图计算完成：7 个可行走点
+2026-06-30 15:54:18 [INFO] 可行走网格计算完成：(500, 500)，可行走比例：56.8%
+2026-06-30 15:54:18 [INFO] 
+2026-06-30 15:54:18 [INFO] 步骤 2/4：生成 UE 轨迹（速度分级 + 碰撞检测）...
+2026-06-30 15:54:19 [INFO] 轨迹生成完成：共 120 条
+2026-06-30 15:54:19 [INFO] 
+2026-06-30 15:54:19 [INFO] 步骤 3/4：执行信道仿真（120 条轨迹）...
+2026-06-30 15:54:19 [INFO] （使用 Sionna 2.x RT 射线追踪，RTX 4060 Ti 约需 1~3 小时）
+2026-06-30 15:54:19 [INFO] 已加载邻区关系（平均邻区数：3.4，预计加速 1.6x）
+2026-06-30 15:58:27 [INFO]   轨迹 5/120 完成，本条耗时 64.9s，已用时 4.2 分钟，预计剩余 96.6 分钟
+2026-06-30 16:04:34 [INFO]   轨迹 10/120 完成，本条耗时 88.1s，已用时 10.3 分钟，预计剩余 113.5 分钟
+2026-06-30 16:13:35 [INFO]   轨迹 15/120 完成，本条耗时 132.1s，已用时 19.3 分钟，预计剩余 135.4 分钟
+2026-06-30 16:25:31 [INFO]   轨迹 20/120 完成，本条耗时 163.0s，已用时 31.3 分钟，预计剩余 156.3 分钟
+2026-06-30 16:40:16 [INFO]   轨迹 25/120 完成，本条耗时 201.7s，已用时 46.0 分钟，预计剩余 174.9 分钟
+2026-06-30 16:57:21 [INFO]   轨迹 30/120 完成，本条耗时 235.6s，已用时 63.1 分钟，预计剩余 189.3 分钟
+2026-06-30 17:18:30 [INFO]   轨迹 35/120 完成，本条耗时 292.4s，已用时 84.2 分钟，预计剩余 204.6 分钟

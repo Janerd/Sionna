@@ -1,0 +1,48 @@
+============================================================
+Sionna RT Dataset Info (Sionna 2.x)
+============================================================
+Generation time: 60404.8 s (1006.7 min)
+
+Scene config:
+  scenario_type: umi
+  num_cells:     7
+  isd:           306.8 m
+  h_bs:          10.0 m
+  fc:            3.5 GHz
+  speeds:        [30.0, 60.0, 120.0] km/h
+
+Dataset size:
+  total samples: 255960
+  train:         153576
+  val:           51192
+  test:          51192
+  feature_dim:   63 (= 9 x 7 cells)
+  window_size:   10 slots (400 ms)
+  pred_horizon:  5 slots (200 ms)
+
+Label distribution (test set):
+  cell_0: 18996 samples (37.1%)
+  cell_1: 5479 samples (10.7%)
+  cell_2: 3423 samples (6.7%)
+  cell_3: 3878 samples (7.6%)
+  cell_4: 3939 samples (7.7%)
+  cell_5: 8918 samples (17.4%)
+  cell_6: 6559 samples (12.8%)
+
+Feature layout (9 x C dims):
+  [0:C]    RSRP_l3         - L3 filtered RSRP [dBm]
+  [C:2C]   RSRQ            - Reference signal quality [dB]
+  [2C:3C]  SINR            - Signal to interference+noise ratio [dB]
+  [3C:4C]  Doppler_est     - Doppler shift estimate [Hz]
+  [4C:5C]  BeamID_norm     - Normalized beam ID [0,1]
+  [5C:6C]  RSRP_diff       - RSRP rate of change [dB/slot]
+  [6C:7C]  BeamID_diff     - Beam ID change
+  [7C:8C]  DelaySpread_norm- Normalized RMS delay spread
+  [8C:9C]  LOS_indicator   - LOS path indicator (0/1)
+
+Key differences from MATLAB version:
+  1. Label: best SINR cell (not best RSRP cell)
+  2. Features: no GT speed/direction; added delay spread, LOS indicator
+  3. Channel: Sionna 2.x ray tracing (real 3D buildings)
+  4. SINR: only strong interferers (RSRP gap < 10dB)
+  5. pred_horizon: 5 slots (200ms) vs 20 slots (800ms) in MATLAB

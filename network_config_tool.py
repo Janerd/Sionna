@@ -270,36 +270,48 @@ def visualize_network_config(
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
     ax.tick_params(labelsize=11)
 
-    # ---- 1. 建筑物投影（使用 Mitsuba API 从场景网格提取）----
-    # 正确方式：scene.mi_scene.shapes() 返回所有网格，
-    # mesh.vertex_positions_buffer().numpy() 返回顶点坐标
+    # ---- 1. 建筑物投影（使用 Mitsuba API，绘制实际网格三角面的 2D 投影）----
+    # 参考 sionna_utils.py：
+    #   vertices = mesh.vertex_positions_buffer().numpy().reshape(-1, 3)
+    #   faces = mesh.faces_buffer().numpy().reshape(-1, 3)
+    # 每个 face 是一个三角形，投影到 XY 平面即为建筑物俯视轮廓
     building_count = 0
+    face_count = 0
     if scene is not None:
         try:
-            from scipy.spatial import ConvexHull
+            from matplotlib.patches import Polygon as MplPolygon
+            from matplotlib.collections import PatchCollection
+
+            all_polygons = []
             for mesh in scene.mi_scene.shapes():
                 try:
                     verts = mesh.vertex_positions_buffer().numpy().reshape(-1, 3)
-                    if len(verts) < 3:
+                    faces = mesh.faces_buffer().numpy().reshape(-1, 3)
+
+                    if len(verts) < 3 or len(faces) == 0:
                         continue
-                    # 过滤地面（z 坐标全部接近 0 的网格）
+
+                    # 过滤地面（所有顶点 z 坐标都接近 0 的网格）
                     if np.max(verts[:, 2]) < 0.5:
                         continue
-                    xy = verts[:, :2]
-                    try:
-                        hull = ConvexHull(xy)
-                        hull_pts = np.append(hull.vertices, hull.vertices[0])
-                        ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
-                                alpha=0.3, color="#A0A0A0", zorder=1)
-                        ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
-                                "-", color="#606060", linewidth=0.5, alpha=0.7, zorder=2)
-                        building_count += 1
-                    except Exception:
-                        pass
+
+                    # 对每个三角面，取 XY 坐标投影
+                    for face in faces:
+                        tri_xy = verts[face, :2]  # [3, 2]
+                        poly = MplPolygon(tri_xy, closed=True)
+                        all_polygons.append(poly)
+                        face_count += 1
+
+                    building_count += 1
                 except Exception:
                     pass
-            if building_count > 0:
-                print(f"  已绘制 {building_count} 个建筑物投影")
+
+            if all_polygons:
+                # 批量绘制所有三角面（性能更好）
+                pc = PatchCollection(all_polygons, alpha=0.35, facecolor="#A0A0A0",
+                                     edgecolor="#606060", linewidth=0.3, zorder=1)
+                ax.add_collection(pc)
+                print(f"  已绘制 {building_count} 个建筑物网格（{face_count} 个三角面）")
             else:
                 print("  未找到建筑物网格（可能场景格式不同）")
         except Exception as e:

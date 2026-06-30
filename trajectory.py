@@ -119,6 +119,32 @@ def _is_walkable(pos: np.ndarray, walkable_grid: Optional[dict]) -> bool:
     return True  # 边界外默认可行走
 
 
+def _wall_slide(
+    pos: np.ndarray,
+    vx: float,
+    vy: float,
+    dt: float,
+    walkable_grid: Optional[dict],
+) -> Optional[np.ndarray]:
+    """
+    沿墙滑行：碰到建筑物时，尝试只移动 X 或 Y 分量，自然绕过建筑物角落。
+
+    返回：
+        可行走的新位置，如果 X/Y 分量都不可行则返回 None
+    """
+    # 尝试只移动 X 方向
+    new_pos_x = pos + np.array([vx, 0.0]) * dt
+    if _is_walkable(new_pos_x, walkable_grid):
+        return new_pos_x
+
+    # 尝试只移动 Y 方向
+    new_pos_y = pos + np.array([0.0, vy]) * dt
+    if _is_walkable(new_pos_y, walkable_grid):
+        return new_pos_y
+
+    return None
+
+
 def _find_walkable_direction(
     pos: np.ndarray,
     speed_ms: float,
@@ -130,34 +156,36 @@ def _find_walkable_direction(
     look_ahead_steps: int = 5,
 ) -> float:
     """
-    当当前方向被建筑物阻挡时，找到一个可行走的街道方向。
+    当当前方向被建筑物阻挡时，找到一个可行走的方向。
 
     策略：
-    1. 优先尝试左转/右转 90°（不允许 U 形转弯，避免来回踱步）
-    2. 向前看 look_ahead_steps 步，确保方向真正畅通
-    3. 选择畅通步数最多的方向
+    1. 候选方向包含 45° 间隔的 8 个方向（覆盖斜角建筑物的路口）
+    2. 向前看 look_ahead_steps 步，选择畅通步数最多的方向
+    3. 优先非 U 形方向，避免来回踱步
 
     参数：
-        look_ahead_steps: 向前预测的步数（越多越不容易走进死胡同）
+        look_ahead_steps: 向前预测的步数
     """
-    # 候选方向：左转、右转（不包含 U 形，避免来回踱步）
-    candidates = [
-        (current_direction + math.pi / 2) % (2 * math.pi),   # 左转 90°
-        (current_direction - math.pi / 2) % (2 * math.pi),   # 右转 90°
-    ]
-    # 加入其他街道方向（排除 U 形）
     u_turn = (current_direction + math.pi) % (2 * math.pi)
+
+    # 候选方向：以 45° 为间隔的 8 个方向（排除 U 形作为首选）
+    # 按优先级排列：小角度偏转优先，大角度偏转其次
+    candidates = []
+    for delta_deg in [45, -45, 90, -90, 135, -135]:
+        d = (current_direction + math.radians(delta_deg)) % (2 * math.pi)
+        candidates.append(d)
+
+    # 加入所有街道方向（覆盖慕尼黑的对角线街道）
     for d in street_dirs_rad:
-        # 排除 U 形方向（与当前方向相差 > 135°）
         angle_diff = abs(math.atan2(math.sin(d - current_direction),
                                     math.cos(d - current_direction)))
-        if angle_diff < 2.5:  # < 143°，不是 U 形
+        if angle_diff < 2.8:  # 排除 U 形（>160°）
             if d not in candidates:
                 candidates.append(d)
 
     # 对每个候选方向，计算向前 look_ahead_steps 步的畅通步数
     best_direction = None
-    best_clear_steps = -1
+    best_score = -1
 
     for direction in candidates:
         clear_steps = 0
@@ -172,11 +200,16 @@ def _find_walkable_direction(
             else:
                 break
 
-        if clear_steps > best_clear_steps:
-            best_clear_steps = clear_steps
+        # 评分：畅通步数为主，小角度偏转加分（更自然）
+        angle_diff = abs(math.atan2(math.sin(direction - current_direction),
+                                    math.cos(direction - current_direction)))
+        score = clear_steps * 10 - angle_diff  # 畅通优先，小偏转次之
+
+        if clear_steps > 0 and score > best_score:
+            best_score = score
             best_direction = direction
 
-    if best_direction is not None and best_clear_steps > 0:
+    if best_direction is not None:
         return best_direction
 
     # 所有方向都被阻挡（极少发生），允许 U 形转弯
@@ -465,16 +498,28 @@ def _generate_street_grid(
             vy = speed_ms * math.sin(direction)
             new_pos = pos[t - 1] + np.array([vx, vy]) * dt
 
-        # 碰撞检测：遇到建筑物时转向
+        # 碰撞检测：先尝试沿墙滑行，再转向
         if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
-            direction = _find_walkable_direction(
-                pos[t - 1], speed_ms, dt, direction,
-                [0.0, math.pi / 2, math.pi, 3 * math.pi / 2],
-                walkable_grid, rng,
-            )
-            vx = speed_ms * math.cos(direction)
-            vy = speed_ms * math.sin(direction)
-            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+            # 1. 先尝试沿墙滑行（绕过建筑物角落）
+            slide_pos = _wall_slide(pos[t - 1], vx, vy, dt, walkable_grid)
+            if slide_pos is not None:
+                new_pos = slide_pos
+                # 更新速度方向为滑行方向
+                slide_vel = new_pos - pos[t - 1]
+                slide_dist = float(np.linalg.norm(slide_vel))
+                if slide_dist > 1e-6:
+                    vx = slide_vel[0] / slide_dist * speed_ms
+                    vy = slide_vel[1] / slide_dist * speed_ms
+            else:
+                # 2. 沿墙滑行也不行，才转向
+                direction = _find_walkable_direction(
+                    pos[t - 1], speed_ms, dt, direction,
+                    [0.0, math.pi / 2, math.pi, 3 * math.pi / 2],
+                    walkable_grid, rng,
+                )
+                vx = speed_ms * math.cos(direction)
+                vy = speed_ms * math.sin(direction)
+                new_pos = pos[t - 1] + np.array([vx, vy]) * dt
 
         pos[t] = new_pos
         vel[t] = [vx, vy]
@@ -576,15 +621,26 @@ def _generate_munich_walk(
             vy = speed_ms * math.sin(direction)
             new_pos = pos[t - 1] + np.array([vx, vy]) * dt
 
-        # 碰撞检测：遇到建筑物时立即转向
+        # 碰撞检测：先尝试沿墙滑行，再转向
         if walkable_grid is not None and not _is_walkable(new_pos, walkable_grid):
-            direction = _find_walkable_direction(
-                pos[t - 1], speed_ms, dt, direction, street_dirs_rad, walkable_grid, rng
-            )
-            in_turn = False  # 取消当前转弯过渡
-            vx = speed_ms * math.cos(direction)
-            vy = speed_ms * math.sin(direction)
-            new_pos = pos[t - 1] + np.array([vx, vy]) * dt
+            # 1. 先尝试沿墙滑行（绕过建筑物角落）
+            slide_pos = _wall_slide(pos[t - 1], vx, vy, dt, walkable_grid)
+            if slide_pos is not None:
+                new_pos = slide_pos
+                slide_vel = new_pos - pos[t - 1]
+                slide_dist = float(np.linalg.norm(slide_vel))
+                if slide_dist > 1e-6:
+                    vx = slide_vel[0] / slide_dist * speed_ms
+                    vy = slide_vel[1] / slide_dist * speed_ms
+            else:
+                # 2. 沿墙滑行也不行，才转向
+                direction = _find_walkable_direction(
+                    pos[t - 1], speed_ms, dt, direction, street_dirs_rad, walkable_grid, rng
+                )
+                in_turn = False  # 取消当前转弯过渡
+                vx = speed_ms * math.cos(direction)
+                vy = speed_ms * math.sin(direction)
+                new_pos = pos[t - 1] + np.array([vx, vy]) * dt
 
         pos[t] = new_pos
         vel[t] = [vx, vy]

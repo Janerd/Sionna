@@ -127,33 +127,64 @@ def _find_walkable_direction(
     street_dirs_rad: List[float],
     walkable_grid: Optional[dict],
     rng: np.random.Generator,
+    look_ahead_steps: int = 5,
 ) -> float:
     """
-    当当前方向被建筑物阻挡时，找到一个可行走的街道方向
+    当当前方向被建筑物阻挡时，找到一个可行走的街道方向。
 
     策略：
-    1. 优先尝试左转/右转 90°
-    2. 其次尝试 U 形转弯
-    3. 最后随机选择一个街道方向
+    1. 优先尝试左转/右转 90°（不允许 U 形转弯，避免来回踱步）
+    2. 向前看 look_ahead_steps 步，确保方向真正畅通
+    3. 选择畅通步数最多的方向
+
+    参数：
+        look_ahead_steps: 向前预测的步数（越多越不容易走进死胡同）
     """
-    # 候选方向：左转、右转、U 形、随机街道方向
+    # 候选方向：左转、右转（不包含 U 形，避免来回踱步）
     candidates = [
-        (current_direction + math.pi / 2) % (2 * math.pi),   # 左转
-        (current_direction - math.pi / 2) % (2 * math.pi),   # 右转
-        (current_direction + math.pi) % (2 * math.pi),        # U 形
+        (current_direction + math.pi / 2) % (2 * math.pi),   # 左转 90°
+        (current_direction - math.pi / 2) % (2 * math.pi),   # 右转 90°
     ]
-    # 加入所有街道方向
-    candidates.extend(street_dirs_rad)
+    # 加入其他街道方向（排除 U 形）
+    u_turn = (current_direction + math.pi) % (2 * math.pi)
+    for d in street_dirs_rad:
+        # 排除 U 形方向（与当前方向相差 > 135°）
+        angle_diff = abs(math.atan2(math.sin(d - current_direction),
+                                    math.cos(d - current_direction)))
+        if angle_diff < 2.5:  # < 143°，不是 U 形
+            if d not in candidates:
+                candidates.append(d)
+
+    # 对每个候选方向，计算向前 look_ahead_steps 步的畅通步数
+    best_direction = None
+    best_clear_steps = -1
 
     for direction in candidates:
-        test_pos = pos + np.array([
-            speed_ms * math.cos(direction),
-            speed_ms * math.sin(direction),
-        ]) * dt
-        if _is_walkable(test_pos, walkable_grid):
-            return direction
+        clear_steps = 0
+        test_pos = pos.copy()
+        for _ in range(look_ahead_steps):
+            test_pos = test_pos + np.array([
+                speed_ms * math.cos(direction),
+                speed_ms * math.sin(direction),
+            ]) * dt
+            if _is_walkable(test_pos, walkable_grid):
+                clear_steps += 1
+            else:
+                break
 
-    # 所有方向都被阻挡（极少发生），随机选一个
+        if clear_steps > best_clear_steps:
+            best_clear_steps = clear_steps
+            best_direction = direction
+
+    if best_direction is not None and best_clear_steps > 0:
+        return best_direction
+
+    # 所有方向都被阻挡（极少发生），允许 U 形转弯
+    if _is_walkable(pos + np.array([math.cos(u_turn), math.sin(u_turn)]) * speed_ms * dt,
+                    walkable_grid):
+        return u_turn
+
+    # 最后兜底：随机选一个街道方向
     return float(rng.choice(street_dirs_rad))
 
 

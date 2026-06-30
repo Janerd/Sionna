@@ -239,16 +239,16 @@ def visualize_network_config(
     scene=None,
 ) -> None:
     """
-    可视化网络配置：基站 + 邻区连线 + UE 轨迹
+    可视化网络配置：建筑物投影 + 基站 + 邻区连线 + UE 轨迹
 
     参数：
         bs_positions:       [num_cells, 2] 基站位置
         neighbor_relations: 邻区关系字典
-        trajectories:       UE 轨迹列表
+        trajectories:       UE 轨迹列表（按速度分色）
         isd:                站间距 [m]
         scene_bounds:       场景边界
         save_path:          保存路径（None 则显示交互式窗口）
-        scene:              Sionna Scene 对象（可选，用于显示建筑物）
+        scene:              Sionna Scene 对象（可选，用于显示建筑物投影）
     """
     # 坐标轴范围：取场景边界和基站实际范围的并集，确保所有基站都显示
     xmin_scene, xmax_scene, ymin_scene, ymax_scene = scene_bounds
@@ -270,7 +270,8 @@ def visualize_network_config(
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
     ax.tick_params(labelsize=11)
 
-    # ---- 1. 建筑物轮廓（如果有 Sionna 场景）----
+    # ---- 1. 建筑物投影（从 Sionna 场景提取，或显示边界框）----
+    building_count = 0
     if scene is not None:
         try:
             for obj_name, obj in scene.objects.items():
@@ -291,17 +292,21 @@ def visualize_network_config(
                             hull = ConvexHull(xy)
                             hull_pts = np.append(hull.vertices, hull.vertices[0])
                             ax.fill(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    alpha=0.25, color="#888888", zorder=1)
+                                    alpha=0.3, color="#A0A0A0", zorder=1)
                             ax.plot(xy[hull_pts, 0], xy[hull_pts, 1],
-                                    "-", color="#555555", linewidth=0.5, alpha=0.6, zorder=2)
+                                    "-", color="#606060", linewidth=0.5, alpha=0.7, zorder=2)
+                            building_count += 1
                         except Exception:
                             pass
                 except Exception:
                     pass
+            if building_count > 0:
+                print(f"  已绘制 {building_count} 个建筑物投影")
         except Exception as e:
-            print(f"  建筑物轮廓提取失败：{e}")
-    else:
-        # 显示场景边界框（用实线，更清晰）
+            print(f"  建筑物投影提取失败：{e}")
+
+    if building_count == 0:
+        # 无建筑物时显示场景边界框
         rect = plt.Rectangle((xmin_scene, ymin_scene),
                               xmax_scene - xmin_scene, ymax_scene - ymin_scene,
                               fill=False, linestyle="--", color="#888888",

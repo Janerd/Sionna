@@ -540,70 +540,126 @@ def _generate_stop_and_go(
 # 批量生成轨迹
 # =========================================================
 
+# =========================================================
+# 速度分级的轨迹类型配置
+# =========================================================
+
+# 不同速度对应的轨迹类型分配（物理上更合理）
+# 低速（≤30 km/h）：行人/自行车，频繁转弯，可以停留
+# 中速（≤60 km/h）：城市车辆，路口转弯，偶尔停留
+# 高速（>60 km/h）：快速路/高速，少转弯，主要直线和大弧度
+TRAJ_TYPES_BY_SPEED = {
+    "low": [        # ≤30 km/h：行人/自行车
+        "munich_walk",   # 35%：慕尼黑街道行走（频繁转弯）
+        "stop_and_go",   # 20%：停留-移动（等红灯）
+        "munich_walk",
+        "street_grid",   # 20%：网格街道
+        "munich_walk",
+        "stop_and_go",
+        "munich_walk",
+        "street_grid",
+        "arc",           # 5%：圆弧（骑车转弯）
+        "munich_walk",
+    ],
+    "mid": [        # 30~60 km/h：城市车辆
+        "street_grid",   # 30%：网格街道（路口转弯）
+        "munich_walk",   # 30%：慕尼黑街道
+        "street_grid",
+        "arc",           # 20%：圆弧转弯（匝道/环岛）
+        "munich_walk",
+        "street_grid",
+        "stop_and_go",   # 10%：停留（红灯）
+        "arc",
+        "munich_walk",
+        "street_grid",
+    ],
+    "high": [       # >60 km/h：快速路/高速
+        "linear",        # 30%：直线（高速公路）
+        "arc",           # 40%：大弧度转弯（匝道）
+        "linear",
+        "arc",
+        "linear",
+        "arc",
+        "street_grid",   # 20%：网格（城市快速路）
+        "linear",
+        "arc",
+        "street_grid",
+    ],
+}
+
+
+def _get_traj_types_for_speed(speed_kmh: float) -> List[str]:
+    """根据速度返回对应的轨迹类型列表"""
+    if speed_kmh <= 30.0:
+        return TRAJ_TYPES_BY_SPEED["low"]
+    elif speed_kmh <= 60.0:
+        return TRAJ_TYPES_BY_SPEED["mid"]
+    else:
+        return TRAJ_TYPES_BY_SPEED["high"]
+
+
 def generate_all_trajectories(
     cfg: SimConfig,
     bs_positions: np.ndarray,
     scene_bounds: Tuple[float, float, float, float],
     seed: int = 42,
+    coverage_points: Optional[np.ndarray] = None,
 ) -> List[Trajectory]:
     """
     生成所有轨迹
 
     参数：
-        cfg:          仿真配置
-        bs_positions: [num_cells, 2] 基站位置
-        scene_bounds: 场景边界 [xmin, xmax, ymin, ymax]
-        seed:         随机种子
+        cfg:             仿真配置
+        bs_positions:    [num_cells, 2] 基站位置
+        scene_bounds:    场景边界 [xmin, xmax, ymin, ymax]
+        seed:            随机种子
+        coverage_points: [N, 2] 可选，覆盖图中的可行走点坐标
+                         如果提供，轨迹起点从这些点中选择（更均匀的分布）
+                         如果为 None，从基站附近的街道交叉口选择
 
     返回：
         trajectories: 所有轨迹的列表
 
-    轨迹分配策略（针对慕尼黑场景优化）：
-        - munich_walk：最真实，专为慕尼黑设计（40%）
-        - street_grid：沿网格街道移动（30%）
-        - arc：圆弧转弯（15%）
-        - stop_and_go：停留-移动交替（10%）
-        - linear：直线（5%，用于基础验证）
+    轨迹分配策略（速度分级，物理上更合理）：
+        低速（≤30 km/h）：行人/自行车，频繁转弯，可以停留
+        中速（≤60 km/h）：城市车辆，路口转弯，偶尔停留
+        高速（>60 km/h）：快速路/高速，少转弯，主要直线和大弧度
     """
     rng = np.random.default_rng(seed)
 
     num_speeds = len(cfg.speeds_ms)
     traj_per_speed = cfg.num_trajectories // num_speeds
 
-    # 轨迹类型分配（针对慕尼黑场景优化）
-    # munich_walk 和 street_grid 最真实，分配最多
-    traj_types = [
-        "munich_walk",   # 40%：慕尼黑街道行走
-        "street_grid",   # 20%：网格街道
-        "munich_walk",   # 重复以增加比例
-        "arc",           # 15%：圆弧转弯
-        "street_grid",   # 重复
-        "stop_and_go",   # 10%：停留-移动
-        "munich_walk",   # 重复
-        "linear",        # 5%：直线
-        "munich_walk",   # 重复
-        "street_grid",   # 重复
-    ]
-
     trajectories = []
 
     print(f"开始生成轨迹：{cfg.num_trajectories} 条，{num_speeds} 种速度")
     print(f"场景边界：X=[{scene_bounds[0]:.0f}, {scene_bounds[1]:.0f}]m, "
           f"Y=[{scene_bounds[2]:.0f}, {scene_bounds[3]:.0f}]m")
+    if coverage_points is not None:
+        print(f"使用覆盖图起点：{len(coverage_points)} 个可行走点")
 
     for s_idx, speed_ms in enumerate(cfg.speeds_ms):
         speed_kmh = cfg.speeds_kmh[s_idx]
-        print(f"\n速度：{speed_kmh:.0f} km/h ({speed_ms:.2f} m/s)")
+        traj_types = _get_traj_types_for_speed(speed_kmh)
+        print(f"\n速度：{speed_kmh:.0f} km/h ({speed_ms:.2f} m/s) "
+              f"→ 轨迹类型：{set(traj_types)}")
 
         for t_idx in range(traj_per_speed):
             traj_type = traj_types[t_idx % len(traj_types)]
+
+            # 如果有覆盖图起点，使用覆盖图中的点作为基站位置的替代
+            # 这样轨迹起点更均匀地分布在整个场景中
+            if coverage_points is not None and len(coverage_points) > 0:
+                effective_bs_positions = coverage_points
+            else:
+                effective_bs_positions = bs_positions
 
             traj = generate_trajectory(
                 cfg=cfg,
                 speed_ms=speed_ms,
                 traj_type=traj_type,
                 scene_bounds=scene_bounds,
-                bs_positions=bs_positions,
+                bs_positions=effective_bs_positions,
                 rng=rng,
             )
 
@@ -620,57 +676,6 @@ def generate_all_trajectories(
     return trajectories
 
 
-# =========================================================
-# 独立运行：测试轨迹生成
-# =========================================================
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    from config import DEFAULT_CONFIG
-    from scene_setup import compute_hexagonal_bs_positions
-
-    cfg = DEFAULT_CONFIG
-    bs_positions = compute_hexagonal_bs_positions(cfg.num_cells, cfg.isd)
-    # 使用固定的慕尼黑场景边界 ±500m，与 scene_setup.py 保持一致
-    scene_bounds = (-500.0, 500.0, -500.0, 500.0)
-
-    print("测试轨迹生成（慕尼黑场景）...")
-
-    rng = np.random.default_rng(42)
-    traj_types = ["linear", "street_grid", "munich_walk", "arc", "stop_and_go"]
-    speed_ms = 30.0 / 3.6
-
-    fig, axes = plt.subplots(1, len(traj_types), figsize=(25, 5))
-
-    for i, traj_type in enumerate(traj_types):
-        traj = generate_trajectory(
-            cfg=cfg,
-            speed_ms=speed_ms,
-            traj_type=traj_type,
-            scene_bounds=scene_bounds,
-            bs_positions=bs_positions,
-            rng=rng,
-        )
-
-        ax = axes[i]
-        ax.plot(traj.pos[:, 0], traj.pos[:, 1], "b-", linewidth=0.8, alpha=0.7)
-        ax.plot(traj.pos[0, 0], traj.pos[0, 1], "go", markersize=8, label="Start")
-        ax.plot(traj.pos[-1, 0], traj.pos[-1, 1], "rs", markersize=8, label="End")
-
-        for c in range(cfg.num_cells):
-            ax.plot(bs_positions[c, 0], bs_positions[c, 1], "r^", markersize=8)
-
-        ax.set_title(f"{traj_type}\n({traj.num_slots} slots)")
-        ax.set_xlabel("X [m]")
-        ax.set_ylabel("Y [m]")
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=7)
-
-        print(f"  {traj_type}: {traj.num_slots} slots, "
-              f"距离≈{speed_ms * traj.num_slots * cfg.slot_duration:.0f}m")
-
-    plt.tight_layout()
-    plt.savefig("trajectory_examples.png", dpi=150, bbox_inches="tight")
-    print("\n轨迹示例已保存到 trajectory_examples.png")
-    plt.close()
+# trajectory.py 不再包含独立运行入口
+# 轨迹可视化已合并到 network_config_tool.py
+# 运行：python network_config_tool.py --no-gui --save

@@ -6,6 +6,11 @@
 #outputs/
 #outputs_*/
 
+#源码
+#sourceCode/sionna-rt-gui/
+sourceCode/sionna-rt/
+sourceCode/sionna/
+
 # ---- Python 缓存 ----
 __pycache__/
 *.py[cod]

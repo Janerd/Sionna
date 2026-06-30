@@ -554,14 +554,29 @@ def main():
         use_english=True,
     )
 
+    # ---- 步骤 1.5：计算覆盖图（用于轨迹起点均匀分布）----
+    logger.info("")
+    logger.info("步骤 1.5/4：计算覆盖图（提取可行走区域，约 1~5 分钟）...")
+    coverage_points = None
+    try:
+        coverage_points = scene_mgr.compute_coverage_points(
+            cell_size=5.0,           # 5m 分辨率，精度和速度的平衡
+            rsrp_threshold_dbm=-105.0,  # 只保留 RSRP > -105 dBm 的区域
+        )
+        logger.info(f"覆盖图计算完成：{len(coverage_points)} 个可行走点")
+    except Exception as e:
+        logger.warning(f"覆盖图计算失败（{e}），使用基站附近起点")
+        coverage_points = None
+
     # ---- 步骤 2：生成轨迹 ----
     logger.info("")
-    logger.info("步骤 2/4：生成 UE 轨迹...")
+    logger.info("步骤 2/4：生成 UE 轨迹（速度分级轨迹类型）...")
     trajectories = generate_all_trajectories(
         cfg=cfg,
         bs_positions=scene_mgr.bs_positions_2d,
         scene_bounds=scene_mgr.scene_bounds,
         seed=args.seed,
+        coverage_points=coverage_points,
     )
     logger.info(f"轨迹生成完成：共 {len(trajectories)} 条")
 

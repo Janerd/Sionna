@@ -682,6 +682,90 @@ class SceneManager:
         margin = max(50.0, self.cfg.isd * 0.5)
         return (xmin + margin, xmax - margin, ymin + margin, ymax - margin)
 
+    def compute_coverage_points(
+        self,
+        cell_size: float = 5.0,
+        rsrp_threshold_dbm: float = -105.0,
+        h_ue: Optional[float] = None,
+    ) -> np.ndarray:
+        """
+        使用 RadioMapSolver 计算覆盖图，提取信号覆盖区域的坐标点。
+
+        这些点代表"有信号的街道区域"，用于轨迹起点的均匀采样，
+        避免起点落在建筑物内或信号盲区。
+
+        参数：
+            cell_size:           覆盖图分辨率 [m]（越小越精细，越慢）
+            rsrp_threshold_dbm:  RSRP 阈值 [dBm]，低于此值的点不作为起点
+            h_ue:                UE 高度 [m]（None 则使用 cfg.h_ue）
+
+        返回：
+            coverage_points: [N, 2] 覆盖区域的 2D 坐标数组
+        """
+        if not self._is_setup or self.scene is None:
+            raise RuntimeError("请先调用 setup() 初始化场景")
+
+        if h_ue is None:
+            h_ue = self.cfg.h_ue
+
+        print(f"计算覆盖图（分辨率 {cell_size}m，RSRP 阈值 {rsrp_threshold_dbm} dBm）...")
+
+        try:
+            from sionna.rt import RadioMapSolver
+            solver = RadioMapSolver()
+            radio_map = solver(
+                self.scene,
+                cell_size=(cell_size, cell_size),
+                center=(0.0, 0.0, h_ue),
+                orientation=(0.0, 0.0, 0.0),
+                size=None,  # 使用场景默认大小
+                measurement_surface="xy",
+                samples_per_tx=int(1e6),
+                max_depth=self.cfg.max_reflections,
+                los=True,
+                specular_reflection=True,
+                diffuse_reflection=False,
+                refraction=True,
+                diffraction=self.cfg.max_diffractions > 0,
+            )
+
+            # 提取路径增益（dB）
+            # radio_map.path_gain 形状：[num_tx, num_cells_y, num_cells_x]
+            path_gain = radio_map.path_gain.numpy()  # [num_tx, H, W]
+
+            # 取所有基站的最大路径增益（最强基站覆盖）
+            max_path_gain = np.max(path_gain, axis=0)  # [H, W]
+
+            # 转换为 RSRP（dBm）
+            p_tx_mw = 10 ** (self.cfg.p_tx_dbm / 10)
+            rsrp_dbm = 10 * np.log10(np.maximum(p_tx_mw * max_path_gain, 1e-20))
+
+            # 提取覆盖区域的坐标
+            # radio_map 的坐标系：中心为 (0,0)，cell_size 为分辨率
+            H, W = rsrp_dbm.shape
+            xmin_map = -W * cell_size / 2
+            ymin_map = -H * cell_size / 2
+
+            coverage_mask = rsrp_dbm > rsrp_threshold_dbm
+            iy, ix = np.where(coverage_mask)
+
+            # 转换为世界坐标
+            x_coords = xmin_map + (ix + 0.5) * cell_size
+            y_coords = ymin_map + (iy + 0.5) * cell_size
+
+            coverage_points = np.column_stack([x_coords, y_coords]).astype(np.float32)
+
+            print(f"  覆盖图大小：{W}×{H}，覆盖点数：{len(coverage_points)}")
+            print(f"  RSRP 范围：[{rsrp_dbm.min():.1f}, {rsrp_dbm.max():.1f}] dBm")
+            print(f"  覆盖率：{coverage_mask.mean()*100:.1f}%")
+
+            return coverage_points
+
+        except Exception as e:
+            print(f"  覆盖图计算失败（{e}），回退到基站附近起点")
+            # 回退：返回基站位置作为起点候选
+            return self.bs_positions_2d.copy()
+
 
 # =========================================================
 # 独立运行：查看场景地图和基站位置

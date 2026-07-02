@@ -852,42 +852,84 @@ class SceneManager:
 
         try:
             from sionna.rt import RadioMapSolver
+
+            # Sionna 2.0.1 RadioMapSolver API
+            # 注意：不同版本参数名可能不同，使用最小参数集确保兼容性
             solver = RadioMapSolver()
-            radio_map = solver(
-                self.scene,
-                cell_size=(cell_size, cell_size),
-                center=(0.0, 0.0, h_ue),
-                orientation=(0.0, 0.0, 0.0),
-                size=None,  # 使用场景默认大小
-                measurement_surface="xy",
-                samples_per_tx=int(1e6),
-                max_depth=self.cfg.max_reflections,
-                los=True,
-                specular_reflection=True,
-                diffuse_reflection=False,
-                refraction=True,
-                diffraction=self.cfg.max_diffractions > 0,
-            )
 
-            # 提取路径增益（dB）
-            # radio_map.path_gain 形状：[num_tx, num_cells_y, num_cells_x]
-            path_gain = radio_map.path_gain.numpy()  # [num_tx, H, W]
+            # 尝试调用，逐步降级参数
+            radio_map = None
+            last_error = None
 
-            # 取所有基站的最大路径增益（最强基站覆盖）
-            max_path_gain = np.max(path_gain, axis=0)  # [H, W]
+            # 方式 1：完整参数（Sionna 2.0.1）
+            try:
+                radio_map = solver(
+                    self.scene,
+                    cell_size=(cell_size, cell_size),
+                    max_depth=self.cfg.max_reflections,
+                    samples_per_tx=int(5e5),  # 降低采样数加快速度
+                    los=True,
+                    specular_reflection=True,
+                    diffuse_reflection=False,
+                    refraction=False,  # 关闭透射加快速度
+                    diffraction=False,  # 关闭衍射加快速度
+                )
+            except Exception as e1:
+                last_error = e1
+                # 方式 2：最小参数
+                try:
+                    radio_map = solver(
+                        self.scene,
+                        cell_size=(cell_size, cell_size),
+                        samples_per_tx=int(5e5),
+                    )
+                except Exception as e2:
+                    last_error = e2
+
+            if radio_map is None:
+                raise RuntimeError(f"RadioMapSolver 调用失败：{last_error}")
+
+            # 提取路径增益
+            # 尝试不同的属性名（Sionna 版本差异）
+            path_gain_np = None
+            for attr in ["path_gain", "rss", "received_power"]:
+                try:
+                    pg = getattr(radio_map, attr)
+                    if hasattr(pg, 'numpy'):
+                        path_gain_np = pg.numpy()
+                    else:
+                        path_gain_np = np.array(pg)
+                    break
+                except AttributeError:
+                    continue
+
+            if path_gain_np is None:
+                raise RuntimeError("无法从 RadioMap 提取路径增益")
+
+            # 处理不同维度格式
+            if path_gain_np.ndim == 3:
+                # [num_tx, H, W]：取所有基站的最大值
+                max_path_gain = np.max(path_gain_np, axis=0)
+            elif path_gain_np.ndim == 2:
+                # [H, W]：已经是合并后的
+                max_path_gain = path_gain_np
+            else:
+                max_path_gain = path_gain_np.squeeze()
 
             # 转换为 RSRP（dBm）
             p_tx_mw = 10 ** (self.cfg.p_tx_dbm / 10)
             rsrp_dbm = 10 * np.log10(np.maximum(p_tx_mw * max_path_gain, 1e-20))
 
             # 提取覆盖区域的坐标
-            # radio_map 的坐标系：中心为 (0,0)，cell_size 为分辨率
             H, W = rsrp_dbm.shape
             xmin_map = -W * cell_size / 2
             ymin_map = -H * cell_size / 2
 
             coverage_mask = rsrp_dbm > rsrp_threshold_dbm
             iy, ix = np.where(coverage_mask)
+
+            if len(iy) == 0:
+                raise RuntimeError(f"没有 RSRP > {rsrp_threshold_dbm} dBm 的区域")
 
             # 转换为世界坐标
             x_coords = xmin_map + (ix + 0.5) * cell_size

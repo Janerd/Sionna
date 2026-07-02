@@ -276,24 +276,56 @@ def visualize_scene_and_trajectories(
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
 
     # ---- 1. 绘制建筑物轮廓 ----
+    building_drawn = False
     if scene is not None:
-        print("提取建筑物轮廓...")
-        outlines = extract_building_outlines(scene)
-        print(f"  找到 {len(outlines)} 个建筑物轮廓")
-        for outline in outlines:
-            ax.fill(outline[:, 0], outline[:, 1],
-                    alpha=0.2, color="#888888", zorder=1)
-            ax.plot(outline[:, 0], outline[:, 1],
-                    "-", color="#555555", linewidth=0.3, alpha=0.5, zorder=2)
-    else:
+        # 优先使用 Mitsuba API（与 network_config_tool.py 一致，更准确）
+        try:
+            from matplotlib.patches import Polygon as MplPolygon
+            from matplotlib.collections import PatchCollection
+            all_polygons = []
+            for mesh in scene.mi_scene.shapes():
+                try:
+                    verts = mesh.vertex_positions_buffer().numpy().reshape(-1, 3)
+                    faces = mesh.faces_buffer().numpy().reshape(-1, 3)
+                    if len(verts) < 3 or len(faces) == 0:
+                        continue
+                    if np.max(verts[:, 2]) < 0.5:
+                        continue
+                    for face in faces:
+                        tri_xy = verts[face, :2]
+                        poly = MplPolygon(tri_xy, closed=True)
+                        all_polygons.append(poly)
+                except Exception:
+                    pass
+            if all_polygons:
+                pc = PatchCollection(all_polygons, alpha=0.3, facecolor="#A0A0A0",
+                                     edgecolor="#606060", linewidth=0.3, zorder=1)
+                ax.add_collection(pc)
+                print(f"  已绘制建筑物投影（{len(all_polygons)} 个三角面）")
+                building_drawn = True
+        except Exception as e:
+            print(f"  Mitsuba API 失败（{e}），尝试备用方法...")
+
+        # 备用：凸包方法
+        if not building_drawn:
+            outlines = extract_building_outlines(scene)
+            if outlines:
+                for outline in outlines:
+                    ax.fill(outline[:, 0], outline[:, 1],
+                            alpha=0.25, color="#A0A0A0", zorder=1)
+                    ax.plot(outline[:, 0], outline[:, 1],
+                            "-", color="#606060", linewidth=0.5, alpha=0.6, zorder=2)
+                print(f"  已绘制 {len(outlines)} 个建筑物轮廓（凸包方法）")
+                building_drawn = True
+
+    if not building_drawn:
         # 无场景时显示场景边界框
         rect = plt.Rectangle((xmin, ymin), scene_width, scene_height,
-                              fill=False, linestyle=":", color="#AAAAAA",
-                              linewidth=1, alpha=0.5, zorder=1)
+                              fill=False, linestyle="--", color="#888888",
+                              linewidth=1.5, alpha=0.7, zorder=1)
         ax.add_patch(rect)
-        ax.text(0.02, 0.98, "No scene loaded\n(use --no-scene to suppress this message)",
-                transform=ax.transAxes, fontsize=9, color="#888888",
-                va="top", ha="left")
+        ax.text(xmin + 10, ymax - 30, "Munich Scene boundary (±500m)",
+                fontsize=10, color="#888888", va="top")
 
     # ---- 2. 绘制小区覆盖范围 ----
     bs_positions = get_bs_positions(cfg)
@@ -303,7 +335,7 @@ def visualize_scene_and_trajectories(
             circle = plt.Circle((pos[0], pos[1]), cfg.isd / 2,
                                  fill=True, facecolor="#E3F2FD",
                                  linestyle="--", edgecolor="#1565C0",
-                                 alpha=0.15, linewidth=1.0, zorder=3)
+                                 alpha=0.15, linewidth=1.2, zorder=3)
             ax.add_patch(circle)
 
     # ---- 3. 绘制 UE 轨迹 ----
@@ -318,13 +350,15 @@ def visualize_scene_and_trajectories(
 
         ax.plot(pos[:, 0], pos[:, 1],
                 color=color, linestyle=linestyle,
-                linewidth=0.8, alpha=alpha_traj, zorder=4)
+                linewidth=1.2, alpha=alpha_traj, zorder=4)
 
         if show_start_end:
             ax.plot(pos[0, 0], pos[0, 1], "o",
-                    color=color, markersize=4, alpha=0.8, zorder=5)
+                    color=color, markersize=6, alpha=0.9, zorder=5,
+                    markeredgecolor="white", markeredgewidth=0.5)
             ax.plot(pos[-1, 0], pos[-1, 1], "s",
-                    color=color, markersize=4, alpha=0.8, zorder=5)
+                    color=color, markersize=6, alpha=0.9, zorder=5,
+                    markeredgecolor="white", markeredgewidth=0.5)
 
         speeds_shown.add(speed)
 
@@ -332,31 +366,31 @@ def visualize_scene_and_trajectories(
     for c in range(cfg.num_cells):
         pos = bs_positions[c]
         ax.plot(pos[0], pos[1], "r^",
-                markersize=12, zorder=10, markeredgecolor="darkred",
-                markeredgewidth=0.5)
+                markersize=16, zorder=10, markeredgecolor="darkred",
+                markeredgewidth=1.0)
         ax.annotate(
             f"BS{c}",
             xy=(pos[0], pos[1]),
-            xytext=(pos[0] + 10, pos[1] + 10),
-            fontsize=7, fontweight="bold", color="darkred",
+            xytext=(pos[0] + 12, pos[1] + 12),
+            fontsize=10, fontweight="bold", color="darkred",
             zorder=11,
-            arrowprops=dict(arrowstyle="-", color="darkred", lw=0.5),
         )
 
     # ---- 5. 坐标轴和标注 ----
-    ax.set_xlabel("X [m]  (East →)", fontsize=12)
-    ax.set_ylabel("Y [m]  (North ↑)", fontsize=12)
+    ax.set_xlabel("X [m]  (East →)", fontsize=13)
+    ax.set_ylabel("Y [m]  (North ↑)", fontsize=13)
+    ax.tick_params(labelsize=11)
 
     speed_str = f"{speed_filter:.0f} km/h" if speed_filter else "all speeds"
     ax.set_title(
         f"Munich Scene — BS Layout & UE Trajectories\n"
         f"{cfg.num_cells} BSs, ISD={cfg.isd}m, h_BS={cfg.h_bs}m  |  "
         f"Trajectories: {len(trajectories)} ({speed_str})",
-        fontsize=12,
+        fontsize=13,
     )
 
     ax.set_aspect("equal")
-    ax.grid(True, alpha=0.2, zorder=0)
+    ax.grid(True, alpha=0.2, zorder=0, linewidth=0.8)
 
     # 坐标轴范围：场景边界 + 5% 边距
     pad_x = scene_width * 0.05
@@ -365,8 +399,8 @@ def visualize_scene_and_trajectories(
     ax.set_ylim(ymin - pad_y, ymax + pad_y)
 
     # 中心十字线
-    ax.axhline(y=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
-    ax.axvline(x=0, color="k", linewidth=0.5, alpha=0.3, zorder=0)
+    ax.axhline(y=0, color="k", linewidth=0.8, alpha=0.3, zorder=0)
+    ax.axvline(x=0, color="k", linewidth=0.8, alpha=0.3, zorder=0)
 
     # ---- 6. 图例 ----
     legend_elements = []
@@ -374,7 +408,7 @@ def visualize_scene_and_trajectories(
     # 基站
     legend_elements.append(
         Line2D([0], [0], marker="^", color="w", markerfacecolor="red",
-               markeredgecolor="darkred", markersize=10, label="Base Station")
+               markeredgecolor="darkred", markersize=13, label="Base Station")
     )
 
     # 速度颜色

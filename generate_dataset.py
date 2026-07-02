@@ -433,7 +433,7 @@ def save_dataset_info(
         f"  train:         {train_mask.sum()}",
         f"  val:           {val_mask.sum()}",
         f"  test:          {test_mask.sum()}",
-        f"  feature_dim:   {X_raw.shape[2]} (= 9 x {cfg.num_cells} cells)",
+        f"  feature_dim:   {X_raw.shape[2]} (= 10 x {cfg.num_cells} cells)",
         f"  window_size:   {cfg.window_size} slots ({cfg.window_size*cfg.slot_duration*1000:.0f} ms)",
         f"  pred_horizon:  {cfg.pred_horizon} slots ({cfg.pred_horizon*cfg.slot_duration*1000:.0f} ms)",
         "",
@@ -448,22 +448,23 @@ def save_dataset_info(
 
     lines.extend([
         "",
-        "Feature layout (9 x C dims):",
+        "Feature layout (10 x C dims):",
         "  [0:C]    RSRP_l3         - L3 filtered RSRP [dBm]",
         "  [C:2C]   RSRQ            - Reference signal quality [dB]",
         "  [2C:3C]  SINR            - Signal to interference+noise ratio [dB]",
-        "  [3C:4C]  Doppler_est     - Doppler shift estimate [Hz]",
+        "  [3C:4C]  Doppler_est     - Doppler shift estimate [Hz] (from paths.doppler)",
         "  [4C:5C]  BeamID_norm     - Normalized beam ID [0,1]",
         "  [5C:6C]  RSRP_diff       - RSRP rate of change [dB/slot]",
         "  [6C:7C]  BeamID_diff     - Beam ID change",
         "  [7C:8C]  DelaySpread_norm- Normalized RMS delay spread",
-        "  [8C:9C]  LOS_indicator   - LOS path indicator (0/1)",
+        "  [8C:9C]  K_factor_norm   - Ricean K factor (LOS/scatter power, normalized)",
+        "  [9C:10C] min_tau_norm    - Normalized first-path delay (proxy for UE-BS distance)",
         "",
         "Key differences from MATLAB version:",
         "  1. Label: best SINR cell (not best RSRP cell)",
-        "  2. Features: no GT speed/direction; added delay spread, LOS indicator",
+        "  2. Features: K_factor + min_tau replace LOS_indicator; Doppler from paths.doppler",
         "  3. Channel: Sionna 2.x ray tracing (real 3D buildings)",
-        "  4. SINR: only strong interferers (RSRP gap < 10dB)",
+        "  4. SINR: all non-serving BSs are interferers (RT-correct)",
         "  5. pred_horizon: 5 slots (200ms) vs 20 slots (800ms) in MATLAB",
     ])
 
@@ -533,7 +534,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"场景：{cfg.scenario_type}，{cfg.num_cells} 小区，ISD={cfg.isd}m")
     logger.info(f"轨迹数：{cfg.num_trajectories}，速度：{cfg.speeds_kmh} km/h")
-    logger.info(f"特征维度：{cfg.num_features}（= 9 × {cfg.num_cells}）")
+    logger.info(f"特征维度：{cfg.num_features}（= 10 × {cfg.num_cells}）")
     logger.info(f"标签：未来 {cfg.pred_horizon} slots 后的最优 SINR 小区")
     logger.info(f"输出目录：{output_dir.absolute()}")
     logger.info(f"GPU：{'是' if cfg.use_gpu else '否（CPU 模式，速度较慢）'}")

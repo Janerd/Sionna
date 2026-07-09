@@ -501,19 +501,15 @@ def run_gui_mode(cfg: dict) -> Optional[np.ndarray]:
         h_bs = cfg.get("bs_config", {}).get("h_bs", 10.0)
         if saved_positions:
             try:
-                from sionna.rt import Transmitter
-                scene_pre = app.gui_instance.scene
-                if scene_pre is not None:
-                    # 清除已有发射机
-                    for tx_name in list(scene_pre.transmitters.keys()):
-                        scene_pre.remove(tx_name)
-                    # 添加已保存的基站
+                gui = app.gui_instance
+                if gui is not None and gui.scene is not None:
+                    # 使用 GUI 的 add_radio_device 方法，同时更新 Polyscope 可视化
                     for p in saved_positions:
-                        tx = Transmitter(
-                            name=f"tx-{p['id']}",
-                            position=[float(p["x"]), float(p["y"]), float(h_bs)],
+                        gui.add_radio_device(
+                            [float(p["x"]), float(p["y"]), float(h_bs)],
+                            is_transmitter=True,
+                            allow_auto_update=False,
                         )
-                        scene_pre.add(tx)
                     print(f"  已预加载 {len(saved_positions)} 个基站位置到 3D 地图")
             except Exception as e:
                 print(f"  预加载基站位置失败（{e}），请在 GUI 中手动放置")

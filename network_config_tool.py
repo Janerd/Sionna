@@ -595,6 +595,9 @@ def main():
     print(f"加载配置文件：{NETWORK_CONFIG_PATH}")
 
     # ---- 获取基站位置 ----
+    # 保存旧的基站位置（用于后续判断是否需要重新计算邻区关系）
+    old_bs_positions_raw = cfg.get("bs_config", {}).get("positions", [])
+
     if args.gui:
         print("\n启动 GUI 模式...")
         new_positions = run_gui_mode(cfg)
@@ -625,17 +628,38 @@ def main():
     existing_num_cells = len(existing_relations) if existing_relations else 0
     current_num_cells = len(bs_positions)
 
-    if existing_relations and existing_num_cells == current_num_cells and not args.gui:
-        # 基站数量没变，且不是 GUI 模式（没有重新放置基站）
+    # 判断基站位置是否实际发生了变化（用于 GUI 模式）
+    positions_changed = False
+    if args.gui:
+        old_positions = old_bs_positions_raw  # 使用 GUI 启动前保存的旧位置
+        if len(old_positions) != current_num_cells:
+            positions_changed = True
+        else:
+            # 比较每个基站的坐标（允许 1m 误差）
+            for i, p in enumerate(old_positions):
+                if (abs(float(p["x"]) - float(bs_positions[i, 0])) > 1.0 or
+                        abs(float(p["y"]) - float(bs_positions[i, 1])) > 1.0):
+                    positions_changed = True
+                    break
+
+    should_recalculate = (
+        not existing_relations or
+        existing_num_cells != current_num_cells or
+        positions_changed
+    )
+
+    if not should_recalculate:
         # 保留手动修改的邻区关系，不重新计算
         neighbor_relations = {int(k): [int(v) for v in vals]
                               for k, vals in existing_relations.items()}
         print(f"\n保留现有邻区关系（{existing_num_cells} 个基站，手动配置不会被覆盖）")
         print_neighbor_stats(neighbor_relations)
     else:
-        # 基站数量变化，或者是 GUI 模式重新放置了基站，重新计算邻区关系
+        # 基站数量变化或位置发生变化，重新计算邻区关系
         if existing_relations and existing_num_cells != current_num_cells:
             print(f"\n基站数量变化（{existing_num_cells} → {current_num_cells}），重新计算邻区关系...")
+        elif positions_changed:
+            print(f"\n基站位置已变化，重新计算邻区关系...")
         else:
             print(f"\n计算邻区关系（最大邻区数：{args.max_neighbors}）...")
 

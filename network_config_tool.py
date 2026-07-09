@@ -497,11 +497,12 @@ def run_gui_mode(cfg: dict) -> Optional[np.ndarray]:
         app = AppHolder(gui_cfg, scene_filename="munich")
 
         # 预加载已保存的基站位置（如果有）
+        # AppHolder.app 是 SionnaRtGui 实例
         saved_positions = cfg.get("bs_config", {}).get("positions", [])
         h_bs = cfg.get("bs_config", {}).get("h_bs", 10.0)
         if saved_positions:
             try:
-                gui = app.gui_instance
+                gui = app.app  # SionnaRtGui 实例
                 if gui is not None and gui.scene is not None:
                     # 使用 GUI 的 add_radio_device 方法，同时更新 Polyscope 可视化
                     for p in saved_positions:
@@ -517,7 +518,7 @@ def run_gui_mode(cfg: dict) -> Optional[np.ndarray]:
         app.show()
 
         # GUI 关闭后，读取基站位置
-        scene = app.gui_instance.scene
+        scene = app.app.scene
         if scene is None:
             print("警告：场景未加载")
             return None

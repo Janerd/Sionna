@@ -368,7 +368,7 @@ def visualize_network_config(
             drawn_pairs.add(pair)
             pos_j = bs_positions[nb_id]
             ax.plot([pos_i[0], pos_j[0]], [pos_i[1], pos_j[1]],
-                    "-", color="#1976D2", linewidth=1.5, alpha=0.5, zorder=4)
+                    "--", color="#555555", linewidth=1.2, alpha=0.6, zorder=4)
 
     # ---- 4. UE 轨迹 ----
     speeds_shown = set()
@@ -425,7 +425,7 @@ def visualize_network_config(
     legend_elements = [
         Line2D([0], [0], marker="^", color="w", markerfacecolor="red",
                markeredgecolor="darkred", markersize=13, label="Base Station"),
-        Line2D([0], [0], color="#1976D2", linewidth=2.5, label="Neighbor link"),
+        Line2D([0], [0], color="#555555", linewidth=2.0, linestyle="--", label="Neighbor link"),
     ]
     for speed in sorted(speeds_shown):
         color = SPEED_COLORS.get(speed, "#9E9E9E")

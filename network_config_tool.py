@@ -495,6 +495,29 @@ def run_gui_mode(cfg: dict) -> Optional[np.ndarray]:
 
         # 启动 GUI
         app = AppHolder(gui_cfg, scene_filename="munich")
+
+        # 预加载已保存的基站位置（如果有）
+        saved_positions = cfg.get("bs_config", {}).get("positions", [])
+        h_bs = cfg.get("bs_config", {}).get("h_bs", 10.0)
+        if saved_positions:
+            try:
+                from sionna.rt import Transmitter
+                scene_pre = app.gui_instance.scene
+                if scene_pre is not None:
+                    # 清除已有发射机
+                    for tx_name in list(scene_pre.transmitters.keys()):
+                        scene_pre.remove(tx_name)
+                    # 添加已保存的基站
+                    for p in saved_positions:
+                        tx = Transmitter(
+                            name=f"tx-{p['id']}",
+                            position=[float(p["x"]), float(p["y"]), float(h_bs)],
+                        )
+                        scene_pre.add(tx)
+                    print(f"  已预加载 {len(saved_positions)} 个基站位置到 3D 地图")
+            except Exception as e:
+                print(f"  预加载基站位置失败（{e}），请在 GUI 中手动放置")
+
         app.show()
 
         # GUI 关闭后，读取基站位置
